@@ -979,7 +979,7 @@ And flip the purchasing data series to be on the negative side.
 
 ![|602x229](https://lh7-rt.googleusercontent.com/docsz/AD_4nXd8Eh2qUHe3yznPWMqDbHVEqPhGsqru6SwClybUK_7hGHOxvV2TeQzQMBKUh5hQzK0ctEYYBPjWiW7nLfXRP42Gy0UtzUD7qEQdVmpG_Eme5LTYwGcW3Paf9WDt5Dx0-5qZurrqzQ?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
-The task is easy: calculate a cumulative sum of the energy price from existing energy records. It turns out into the most complex SQL query presented in this article. To achieve it, we need the window function. It can be written using several ways, but I prefer CTE for readability.
+The task sounds trivial: calculate a cumulative sum of the energy price (sold+avoided-bought) from existing energy records. It turns out into the most complex SQL query presented in this article. To achieve it, we need the window function. It can be written using several ways, but I prefer CTE for readability.
 
 ```sql
 WITH
