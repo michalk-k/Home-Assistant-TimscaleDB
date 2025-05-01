@@ -27,9 +27,7 @@ While Home Assistant (HA) is a powerful automation platform, it's not ideally su
 * Performance issues: Complex queries against SQLite are virtually impossible.
 * Limited analytics: HA’s built-in visualization and analytics capabilities are basic compared to specialized tools like Grafana.
 * Inflexible data access: Data stored in HA's default database is difficult to manipulate or import from external sources. In contrast, PostgreSQL/TimescaleDB allows flexible modification and integration with third-party data, such as electricity provider exports, or recovery from backups if HA's internal storage fails.
-* Refractory on entities replacement: In HA, it's difficult to maintain entity naming when making changes to the household systems, for example, installing solar panels (FVE). Tracking energy before and after such events results in fragmented or incomplete views without an option to visualise them as continuous data.
-
-Note: Home Assistant's Long-Term Statistics (LTS) system is designed for infinite retention, but this applies only to specific statistics, not to the high-resolution state history used by the main recorder.
+* Refractory on entities replacement: In HA, it's difficult to maintain entity naming when making changes to the household systems, for example, installing solar panels (FVE). Such changes lead to using different measurement devices, thus differently named sensors. Tracking energy before and after such events results in fragmented or incomplete views, without an option to visualise them as continuous data.
 
 ## Benefits of Using TimescaleDB
 
@@ -40,7 +38,7 @@ TimescaleDB, a time-series extension of PostgreSQL, offers a more robust solutio
 * Advanced queries: Supports SQL with time-series specific functions.
 * Continuous Aggregates: Enables efficient pre-aggregation of data for fast queries.
 * Flexible retention and compression: Easily drop or compress old data while preserving aggregate summaries (which can also be compressed)
-* Changes to the data are up to your will. You can rename entities, import data from other systems. For example, you can import consumed energy data offered by the provider from time periods HA system did not measure house consumption, etc.
+* Changes to the data are up to your will. You can import data from other systems, rename entities. For example, you can import consumed energy data offered by the provider from time periods HA system did not measure house consumption, etc.
 * On-the-fly data transformation like filtering, renaming, unit conversion, and more.
 
 Bonus: Grafana can bring all this data to life with interactive dashboards right from the start.
@@ -53,11 +51,9 @@ All in one, with TimescaleDB, it’s possible to achieve energy analytics unavai
 
 To get started, ensure the following components are installed and configured:
 
-* Home Assistant sensors. Read below for the requirements about HA sensors
+* Home Assistant sensors. Read below for the requirements for HA sensors
 * Long-Term Statistics Store (LTSS) integration. Link: https://github.com/freol35241/ltss
-* TimescaleDB Add-on running in your HA Supervisor environment or as an external service. Link: https://github.com/expaso/hassos-addon-timescaledb
-* TimescaleDB Toolkit extension enabled.
-* Periodic Energy sensors are provided by Home Assistant. At least hourly ones. Power sensors alone can be useful too, including the possibility of calculating energy out of them by TimescaleDB. But having energy sensors is more comfortable, and energy measurements provided directly by external devices like SmartMeters or inverters are considered more precise.
+* TimescaleDB with TimescaleDB Toolkit extension enabled. It might be an add-on running in your HA Supervisor environment or as an external service. Link: https://github.com/expaso/hassos-addon-timescaledb
 
 ### Home Assistant Sensors
 
@@ -80,7 +76,7 @@ time ────o─────o─o─────o─────|───�
 ```
 Here:
 
-* "o" represents a measurement point (sensor reading)
+* "o" represents an energy data point (sensor reading)
 * x is the last reading before midnight
 * y is the first reading after midnight
 
@@ -118,7 +114,7 @@ This is usually enough for most use cases, unless you're dealing with high-frequ
 Home Assistant can create energy sensors with different units — for example, Wh, kWh, or even MWh.
 When you configure your utility meters, make sure all related sensors use the same unit.
 
-If your sensors use mixed units, you have tree options (some are more messy then others):
+If your sensors use mixed units, you have three options (some are messier than others):
 
 * Convert the units when recording data into the database
 * Convert the units later during data aggregation
@@ -130,7 +126,8 @@ Later in this article, you'll see that units are stored together with the data. 
 Stick to `kWh` as your standard unit.
 It’s the most common, easy to read, and fits well for hourly or daily energy tracking.
 
-### Installing LTSS and TimescaleDB Add-on
+# LTSS and TimescaleDB installation
+## Timescale DB
 
 1. Navigate to Home Assistant Add-on Store.
 2. Search and install TimescaleDB.
@@ -153,9 +150,9 @@ TimescaleDB is an extension (plug-in) to PostgreSQL database. It introduces a po
 
 A Hypertable - it’s a new type of table, provided with TimescaleDB. It boasts of many, many features, which scope is beyond this article. For understanding what is coming next, there are the main features:
 
-* automatic partitioning - in our case, we will partition by time
-* optional compression
-* optional data retention
+* Automatic partitioning - in our case, we will partition by time
+* Optional compression
+* Optional data retention
 
 Continuous Aggregates (CAGGs) are materialized views that maintain aggregated data over time. These views are automatically updated as new data arrives. They are useful for:
 
@@ -165,8 +162,10 @@ Continuous Aggregates (CAGGs) are materialized views that maintain aggregated da
 * CAGGs are based on hypertables, being able to make use of their features. Since data are stored in the table, data in CAGG might be modified manually using regular SELECT, UDPATE, DELETE statements
 
 ## Configuring LTSS to Export Energy Sensors
+LTSS writes all data into a single table: `public.ltss`. Since the `public` schema is set in `search_path` by default, the table can be referenced without a schema name (ltss).
+Once LTSS is installed, configure it to export all sensors you need to TimescaleDB. 
 
-Once LTSS is installed, configure it to export all sensors you need to TimescaleDB. It's important to know that LTSS writes all data into a single table. So, at the end, you likely will publish not only energy data, but also temperatures and humidity, HA system metrics like CPU or Storage usage.
+While this article covers energy only, it's expected that later on, you will publish more sensors like temperatures and humidity, HA system metrics like CPU or Storage usage.
 
 Configuration of LTSS typically involves selecting the appropriate sensors in the integration’s configuration in configuration.yaml, for example:
 
@@ -211,7 +210,7 @@ FOR EACH ROW
 EXECUTE FUNCTION ltss_filter_trigger();
 ```
 
-It's important to note that HA sensors often include extensive and unnecessary metadata in their attributes field. These attributes are stored as JSONB in the database, which can significantly increase disk usage. If the additional metadata is not essential for your use case, it's wise to strip it away to optimize storage. Below is a trigger that retains only the unit_of_measurement attribute, which is typically the most relevant, thereby minimizing storage overhead caused by extraneous data:
+HA sensors often include extensive and unnecessary metadata in their attributes field. These attributes are stored as JSONB in the database, which can significantly increase disk usage. If the additional metadata is not essential for your use case, it's wise to strip it away to optimize storage. Below is a trigger that retains only the unit_of_measurement attribute, which is typically the most relevant, thereby minimizing storage overhead caused by extraneous data:
 
 ```sql
 CREATE OR REPLACE FUNCTION ltss_strip_attributes()
@@ -245,6 +244,7 @@ This text will be hidden
 ```
 
 This trigger is especially useful when storing large amounts of sensor data where the attributes field may otherwise bloat the database.
+Note, there is another tool to manage a large amount of data: compression (described later).
 
 # Understanding the TimescaleDB Architecture
 
