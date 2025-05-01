@@ -59,11 +59,16 @@ To get started, ensure the following components are installed and configured:
 * TimescaleDB Toolkit extension enabled.
 * Periodic Energy sensors are provided by Home Assistant. At least hourly ones. Power sensors alone can be useful too, including the possibility of calculating energy out of them by TimescaleDB. But having energy sensors is more comfortable, and energy measurements provided directly by external devices like SmartMeters or inverters are considered more precise.
 
-### Periodic Sensors
+### Home Assistant Sensors
 
 Before we move on, this topic deserves a bit of extra explanation.
-Our goal is to have precalculated energy values for specific periods, such as hourly, daily, or weekly totals.
+LTSS doesn't publish long-term values. Only real-time values from original sensors, and only in the moment the sensor gets new value.
+Home assistant records energy as continuously increasing values. It's allowed that these values are reset to zero. Then it increases again.
+The energy might be reported by external devices or calculated from reported power.
 
+The frequency of updates is not pre-determined, but depends mostly on source devices providing those values. It might be one sample per hour or 10 samples per second.
+
+Our goal is to achieve precalculated energy values for specific periods, such as hourly, daily, or weekly totals.
 In an ideal world, where we had infinitely dense data (measurements at every possible moment), we could calculate energy usage for any period at any time.
 But with sparse data (only occasional measurements), it's technically impossible to do this accurately without interpolation.
 
@@ -80,7 +85,7 @@ Here:
 * y is the first reading after midnight
 
 Suppose we want to calculate total energy usage for the day (midnight to midnight).
-With this data, it's impossible to precisely determine:
+With data distributed as in the picture, it's impossible to precisely determine:
 
 * the energy used between x and midnight
 * the energy used between midnight and y
@@ -91,15 +96,20 @@ Sometimes your energy readings will be frequent enough that the error is small, 
 How to solve this?
 
 We can use Home Assistant's Utility Meters.
-These sensors reset automatically at the start of each period (hourly, daily, monthly, etc.).
+These sensors reset automatically at the start of each period (quarter-hourly, hourly, daily, monthly, etc.).
 Based on my observations:
 
-* The first recorded value for a new period is always 0.
-* The first value following zero-point represents the energy increment since the last datapoint before zero-point.
-* Subsequent datapoints are the sum of the last one and the energy collected since the previous data point (until the next reset).
+* The first recorded value for each period is always 0.
+* The first value following the reset represents the energy collected since the last known value before zero-point.
 
 In other words, the value at y would represent the delta (the amount of energy used) between x and y.
 This method isn't 100% precise, but it helps avoid major issues like "energy leakage" between periods.
+
+Worth mentioning that
+* Values in datapoints are continuously increasing (until the next reset).
+* Updates of utility sensors reflect the original sensor. So all publish the same values. 
+
+It renders into conclusion that there is no need to publish daily sensors together with daily ones. The shortest time utility sensor is enough to cover our needs.
 
 **Note:**
 In this article, we assume hourly data as the baseline.
@@ -107,7 +117,7 @@ This is usually enough for most use cases, unless you're dealing with high-frequ
 
 ### Consistent Units for Energy Sensors
 
-Home Assistant can create energy sensors with different units — for example: Wh, kWh, or even MWh.
+Home Assistant can create energy sensors with different units — for example, Wh, kWh, or even MWh.
 When you configure your utility meters, make sure all related sensors use the same unit.
 
 If your sensors use mixed units, you have two options (but both are a bit messy):
