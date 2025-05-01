@@ -387,7 +387,7 @@ Because data coming from HA is appending only (no updates nor deletes), setting 
 * For hourly aggregates: `start_offset = 1 hour, end_offset = 15 minutes, schedule_interval = 15` minutes
 * For daily aggregates: `start_offset = 1 day, end_offset = 4 hours, schedule_interval = 2 hours`
 
-Real-Time Aggregates
+### Real-Time Aggregates
 
 One valid concern with the configuration we discussed earlier is that queries against Continuous Aggregates (CAGGs) might show accurate historical data, but may not reflect the most recent changes in real-time.
 
