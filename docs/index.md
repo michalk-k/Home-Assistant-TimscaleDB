@@ -62,13 +62,13 @@ To get started, ensure the following components are installed and configured:
 ### Home Assistant Sensors
 
 Before we move on, this topic deserves a bit of extra explanation.
-LTSS doesn't publish long-term values. Only real-time values from original sensors, and only in the moment the sensor gets new value.
-Home assistant records energy as continuously increasing values. It's allowed that these values are reset to zero. Then it increases again.
+LTSS doesn't publish long-term values. Only real-time values from original sensors, and only at the moment the sensor gets a new value.
+Home assistant records energy as a continuously increasing value. It may reset to zero. Then it increases again.
 The energy might be reported by external devices or calculated from reported power.
 
 The frequency of updates is not pre-determined, but depends mostly on source devices providing those values. It might be one sample per hour or 10 samples per second.
 
-Our goal is to achieve precalculated energy values for specific periods, such as hourly, daily, or weekly totals.
+Our goal is to collect energy for a specific period, such as an hour, a day, or a weekend.
 In an ideal world, where we had infinitely dense data (measurements at every possible moment), we could calculate energy usage for any period at any time.
 But with sparse data (only occasional measurements), it's technically impossible to do this accurately without interpolation.
 
@@ -95,21 +95,19 @@ Sometimes your energy readings will be frequent enough that the error is small, 
 
 How to solve this?
 
-We can use Home Assistant's Utility Meters.
-These sensors reset automatically at the start of each period (quarter-hourly, hourly, daily, monthly, etc.).
-Based on my observations:
-
+We can use Home Assistant's Utility Meters. Based on my observations:
+* Such sensors reset automatically at the start of each period (quarter-hourly, hourly, daily, monthly, etc.)
 * The first recorded value for each period is always 0.
 * The first value following the reset represents the energy collected since the last known value before zero-point.
 
-In other words, the value at y would represent the delta (the amount of energy used) between x and y.
-This method isn't 100% precise, but it helps avoid major issues like "energy leakage" between periods.
+In the result, the value at y represents the delta (the amount of energy used) between x and y.
+This method causes energy from before the end of the period to be accounted for in the next one.
 
 Worth mentioning that
-* Values in datapoints are continuously increasing (until the next reset).
-* Updates of utility sensors reflect the original sensor. So all publish the same values. 
+* The value of utility energy sensors continuously increases (until the next reset).
+* All utility sensors (regardless of reset time interval) based on the same source sensor are updated at the same rate as the source sensor.
 
-It renders into conclusion that there is no need to publish daily sensors together with daily ones. The shortest time utility sensor is enough to cover our needs.
+It renders into conclusion that there is no need to publish daily sensors together with hourly ones. The shortest time utility sensor is enough to cover our needs, since we can make daily values out of hourly ones.
 
 **Note:**
 In this article, we assume hourly data as the baseline.
@@ -120,10 +118,11 @@ This is usually enough for most use cases, unless you're dealing with high-frequ
 Home Assistant can create energy sensors with different units — for example, Wh, kWh, or even MWh.
 When you configure your utility meters, make sure all related sensors use the same unit.
 
-If your sensors use mixed units, you have two options (but both are a bit messy):
+If your sensors use mixed units, you have tree options (some are more messy then others):
 
 * Convert the units when recording data into the database
-* Convert the units later during data aggregation or calculations
+* Convert the units later during data aggregation
+* Unify units during visualization
 
 Later in this article, you'll see that units are stored together with the data. However, unit conversion is not covered in the example queries — they assume everything is already consistent.
 
