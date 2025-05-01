@@ -478,7 +478,7 @@ For example, in my setup:
 
 That's a compression ratio of more than 50× — seriously impressive.
 
-### How Compression Works
+### How to setup compression
 
 To maintain good query performance on compressed data, the compressed format must match your query patterns. Specifically, you need to carefully choose:
 
@@ -493,14 +493,14 @@ In our case:
 You can configure and automate compression for older chunks like this:
 
 ```sql
-ALTER TABLE cagg_energy_hourly
+ALTER TABLE ltss
 SET
 (
    timescaledb.compress,
    timescaledb.compress_orderby='time',
    timescaledb.compress_segmentby='entity_id'
 );
-SELECT add_compression_policy('cagg_energy_hourly', compress_after => '30d'::INTERVAL);
+SELECT add_compression_policy('ltss', compress_after => '30d'::INTERVAL);
 ```
 
 This setup will automatically compress data older than 30 days.
