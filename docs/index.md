@@ -620,16 +620,14 @@ Transformations for Data Formatting
 Once the query is set, it's time to adjust the data in Grafana. The next step involves using the Transformations tab in Grafana to manipulate the data into the right format for visualization.
 
 1. Partition by Transformation:
-
-  * Add a Partition by transformation.
-  * Select entity_id as the field by which Grafana will partition the data into separate series.
-  * Set As label for naming, and keep fields to “No” (this affects axis naming and color mapping).
+   * Add a Partition by transformation.
+   * Select entity_id as the field by which Grafana will partition the data into separate series.
+   * Set As label for naming, and keep fields to “No” (this affects axis naming and color mapping).
 
 2. This is a common setup for all graphs you'll create, ensuring consistent handling of axes.
 3. Rename Fields by Regex:
-
-  * Use the Rename by regex transformation to format field names appropriately.
-  * This helps in cleaning up or adjusting axis labels and field names to make them more readable and useful in the context of the graph.
+   * Use the Rename by regex transformation to format field names appropriately.
+   * This helps in cleaning up or adjusting axis labels and field names to make them more readable and useful in the context of the graph.
 
 ![|602x377](https://lh7-rt.googleusercontent.com/docsz/AD_4nXcS3sA08CpPWgS543vTa7a-FXnyZAB8mLcnjCynA8-789apelH-_aqhS5vbGADkp6EPKSaDUD6K6LshTl5Vd-QrTI2EC4vIb-2WM0Q6fUrwC3dMi7RzFneyv5scmhQKTUQt6h1jyg?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
