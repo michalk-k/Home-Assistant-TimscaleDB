@@ -647,7 +647,7 @@ Previously, we visualized daily results based on hourly CAGGs. Now, let’s enha
 
 Understanding Grafana’s dynamic setup can take some time, but I’ll provide a ready-to-use solution to achieve this functionality.
 
-#### Step 1: Define Variables in Grafana
+**Define Variables in Grafana**
 
 1. Go to Dashboard Settings → Variables
 2. Add the following variables to control granularity and data source selection:
