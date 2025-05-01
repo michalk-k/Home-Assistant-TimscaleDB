@@ -53,8 +53,8 @@ All in one, with TimescaleDB, it’s possible to achieve energy analytics unavai
 
 To get started, ensure the following components are installed and configured:
 
-* Home Assistant sensors. Read below for requirements
-* with the Long-Term Statistics Store (LTSS) integration. Link: https://github.com/freol35241/ltss
+* Home Assistant sensors. Read below for the requirements about HA sensors
+* Long-Term Statistics Store (LTSS) integration. Link: https://github.com/freol35241/ltss
 * TimescaleDB Add-on running in your HA Supervisor environment or as an external service. Link: https://github.com/expaso/hassos-addon-timescaledb
 * TimescaleDB Toolkit extension enabled.
 * Periodic Energy sensors are provided by Home Assistant. At least hourly ones. Power sensors alone can be useful too, including the possibility of calculating energy out of them by TimescaleDB. But having energy sensors is more comfortable, and energy measurements provided directly by external devices like SmartMeters or inverters are considered more precise.
@@ -85,7 +85,7 @@ With this data, it's impossible to precisely determine:
 * the energy used between x and midnight
 * the energy used between midnight and y
 
-You could try to interpolate (estimate) these missing parts, but for our case (explained later), interpolation isn't a good solution.
+You could try to interpolate (estimate) these missing parts, but for our case (explained later), interpolation isn't the way to go.
 Sometimes your energy readings will be frequent enough that the error is small, but you can’t always count on that.
 
 How to solve this?
@@ -95,7 +95,8 @@ These sensors reset automatically at the start of each period (hourly, daily, mo
 Based on my observations:
 
 * The first recorded value for a new period is always 0.
-* Each following value represents the energy collected since the previous data point (until the next reset).
+* The first value following zero-point represents the energy increment since the last datapoint before zero-point.
+* Subsequent datapoints are the sum of the last one and the energy collected since the previous data point (until the next reset).
 
 In other words, the value at y would represent the delta (the amount of energy used) between x and y.
 This method isn't 100% precise, but it helps avoid major issues like "energy leakage" between periods.
