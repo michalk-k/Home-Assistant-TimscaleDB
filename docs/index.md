@@ -57,7 +57,8 @@ To get started, ensure the following components are installed and configured:
 
 ### Home Assistant Sensors
 
-Before we move on, with database, we need to aknowledge the data character. 
+Before we move on, with database, we need to aknowledge the character of data and make sure HA provides sensors we can use later.
+
 In general, energy data tracked by Home Assistant sensors grows in time indefinitely. Optionally it's allowed that from time to time the value is reset to zero and starts counting again. The reset can be triggered by measurement device or by HA itself (utility sensors) at any time.
 
 It's important to understand this concept, because it makes common methods like sum or delta not applicable to such evolving data. Managing it using common SQL might be pretty complex. 
@@ -120,62 +121,80 @@ It’s the most common, easy to read, and fits well for hourly or daily energy t
 # LTSS and TimescaleDB installation
 ## Timescale DB
 
-1. Navigate to Home Assistant Add-on Store.
-2. Search and install TimescaleDB.
-3. Note the database name, username, password, and port — you’ll need them for LTSS.
-4. Install LTSS integration via the HACS or YAML configuration.
-5. Connect to your TimescaleDB instance and run:
+TimescaleDB can be installed as separate service maintained by you, or using ready to use Home Assistant add-on. Installation process is described on the [add-on github pages](https://github.com/expaso/hassos-addon-timescaledb?tab=readme-ov-file#installation).
+
+To perform needed changes, you will need some db client to. The first already build-in option is a `psql` console. To get to it you have enter the timescale add-on docker.
+```
+docker exec -it addon_77b2833f_timescaledb  /bin/bash
+```
+
+If you prefer GUI client, the you can pgAdmin4 in form of another HA addon, or use other clients like DBeaver. In both cases enabling exposing postresql port in TimescaleDB Add-on settings is required.
+
+Let's start with creation of extensions needed later on:
 ```sql
+CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS timescaledb_toolkit;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 ```
-The timescaledb_toolkit enables additional time-series features, including advanced analytics. It's needed for work with continuously growing values, like energy.
+
+:bulb: By installting the `postgis` extention, we avoiding the need of giving LTSS component superuser privileges (which is trying to install the extention otherwise)
+
+The `timescaledb_toolkit` enables additional time-series features. They are needed to to work with continuously increasing energy values, like energy.
 
 The `btree_gist` will be needed later on for cost reports creation.
 
-# TimescaleDB basics
+At the next step, let's create a dedicated schema. We will create all new objects in this schema to maintain clarity.
+```sql
+CREATE SCHEMA ltss_energy;
+```
 
-This part of the article provides basic information about TimescaleDB objects, including information on how to perform some useful operations with them.
-
-TimescaleDB is an extension (plug-in) to PostgreSQL database. It introduces a powerful row-columnar engine (hypercore), and the TimescaleDB features are built upon.
-
-A Hypertable - it’s a new type of table, provided with TimescaleDB. It boasts of many, many features, which scope is beyond this article. For understanding what is coming next, there are the main features:
-
-* Automatic partitioning - in our case, we will partition by time
-* Optional compression
-* Optional data retention
-
-Continuous Aggregates (CAGGs) are materialized views that maintain aggregated data over time. These views are automatically updated as new data arrives. They are useful for:
-
-* Improving query performance by precomputing data (ie, daily totals)
-* Enabling efficient storage via summarized data
-* Allowing old data deletion from the source table
-* CAGGs are based on hypertables, being able to make use of their features. Since data are stored in the table, data in CAGG might be modified manually using regular SELECT, UDPATE, DELETE statements
+The last but not least, create dedicated user for home assistant (and optionally for you). For example:
+```sql
+CREATE ROLE ha LOGIN PASSWORD 'some_password';
+```
 
 ## Configuring LTSS to Export Energy Sensors
-LTSS writes all data into a single table: `public.ltss`. Since the `public` schema is set in `search_path` by default, the table can be referenced without a schema name (ltss).
-Once LTSS is installed, configure it to export all sensors you need to TimescaleDB. 
+LTSS is the Home Assistant's custom component. It can be installed by HACS. 
+Installation instructions are available in [project Github](https://github.com/freol35241/ltss?tab=readme-ov-file#installation).
 
-While this article covers energy only, it's expected that later on, you will publish more sensors like temperatures and humidity, HA system metrics like CPU or Storage usage.
+LTSS writes all data into a single table: `public.ltss` (without option to change). In the article will be referenced just as `ltss` since schema `public` ussually doesn't need to be referenced.
 
-Configuration of LTSS typically involves selecting the appropriate sensors in the integration’s configuration in configuration.yaml, for example:
+During start, the LTSS checks existence of `ltss` table. If doesn't exist, it creates it as well as adds `postgis` extension to the database. For the latter operation, it requires superuser privilges
+
+Once LTSS is installed, configure it to export all sensors you need to TimescaleDB 
+
+> :warning: configuration change requires HA restart. 
+
+Configuration of LTSS typically involves selecting the appropriate sensors in the integration’s configuration in configuration.yaml.
+
+Example below makes LTSS component connected to `ha_ltss` database available in TimescaleDB installed as HA add-on with user `ha`. It will publish specified glances sensors (unimportant from pov of this article, just example) and all sensors which name ends with `_hourly` phrase.
 
 ```yaml
 ltss:
-  db_url: postgresql://ltss_user:password@localhost/ltss_db
+  db_url: postgresql://ha:some_password@77b2833f-timescaledb/ha_ltss
   include:
-  domains:
-    - sensor
-  entities:
-    - sensor.total_energy_consumption
-    - sensor.solar_production
+    entities:
+      - sensor.glances_cpu_load
+      - sensor.glances_cpu_used
+      - sensor.glances_cpu_percent
+      - sensor.glances_cpu_thermal_0_temperature
+      - sensor.glances_ram_free
+      - sensor.glances_ram_used
+      - sensor.glances_ram_used_percent
+      - sensor.glances_swap_free
+      - sensor.glances_swap_used
+      - sensor.glances_data_free
+      - sensor.glances_swap_used
+      - sensor.glances_data_used_percent
+    entity_globs:
+      - sensor.*_hourly
 ```
-The configuration is similar to what the recorder offers, including globs. Unfortunately, it inherits the limitation that entities included by globs cannot be excluded anymore. In such a case, there are two options: replace globs with an explicit list of sensors, or let LTSS publish a broader set of data, to reject some entities with the use of a before trigger. While the second option seems tempting, it's easy to forget about such a trigger later on. Also it still costs additional communication and processing.
+The configuration is similar to what the recorder offers, including globs. Unfortunately, it inherits the limitation that entities included by globs cannot be excluded anymore. In such a case, there are two options: replace globs with an explicit list of sensors, or let LTSS publish a broader set of data, to reject some entities with the use of a before trigger. While the second option seems tempting, it's easy to forget about such a trigger later on. Also it still costs additional communication and processing. But sometimes knowing this way might be life saving. 
 
 Anyway, here is an example of such a trigger:
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_filter_trigger()
+CREATE OR REPLACE FUNCTION ltss_exclude_entities()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $code$
@@ -183,8 +202,8 @@ BEGIN
     -- Filter out unwanted entities before insertion
     IF NEW.entity_id NOT IN 
        (
-           'sensor.unwanted_energy_consumption',
-           'sensor.solar_production'
+           'sensor.unwanted_energy_consumption_hourly',
+           'sensor.solar_production_hourly'
        )
     THEN
        RETURN NULL;  -- Skip insert
@@ -195,7 +214,7 @@ END;
 $code$;
 
 
-CREATE TRIGGER ltss_filter_trigger
+CREATE TRIGGER ltss_exclude_entities
 BEFORE INSERT ON ltss
 FOR EACH ROW
 EXECUTE FUNCTION ltss_filter_trigger();
@@ -231,7 +250,6 @@ CREATE TRIGGER ltss_strip_attributes
 BEFORE INSERT ON ltss
 FOR EACH ROW
 EXECUTE FUNCTION ltss_strip_attributes();
-This text will be hidden
 ```
 
 This trigger is especially useful when storing large amounts of sensor data where the attributes field may otherwise bloat the database.
@@ -248,7 +266,7 @@ The TimescaleDB introduces a so-called hypertable. For a lot of use cases, it be
 * Compression: Built-in support to compress historical chunks.
 * Retention policies: You can automatically drop data older than a defined threshold.
 
-The table, the LTSS inserts data into is the hypertable. Also, Continuous Aggregates (described below) store data into hyper tables, inheriting all their features.
+The LTSS inserts data into is the hypertable. Also, Continuous Aggregates (described below) store data into hyper tables, inheriting all their features. We will be back to this subject in this article later.
 
 ## Using Continuous Aggregates
 
@@ -259,6 +277,10 @@ Continuous Aggregates (CAGGs) are materialized views that maintain aggregated da
 * Allowing old data deletion from the source table, without affecting reports
 * Being based on hypertables, CAGGs data can be compressed (or removed after some time, which is not what we need though)
 
+Earlier in the article I mentioned, that utility sensors refreshing with the same rate as source sensors. It's not impossible that single sensor generates 10MB of data daily. It all depends on changes frequency.
+
+> :bulb: Thanks to CAGGs, we will transform that amount of data into single value per defined time period. 
+
 ### Defining Continuous Aggregates
 
 Before we jump into CAGGs, let’s start with a helper function. Believe me or not, changing entity names, renaming them, is something that just happens, especially at the beginning of the setup. For example, I found that it’s better to have a generic name for injected/purchased energy rather than use names dependent on a measuring device. This way I can cover pre-FV a FV eras together.
@@ -266,7 +288,7 @@ Before we jump into CAGGs, let’s start with a helper function. Believe me or n
 Anyway, I found out that it’s easier to add a new sensor name or manipulate its name when the list of sensors is provided by the utility function, rather than hardcoded within a CAGG. There is no option to update the statement of the materialized view. At the same time, the function can be replaced at any time. Note the IMMUTABLE keyword in this function definition.
 
 ```sql
-CREATE OR REPLACE FUNCTION public.get_entities_for_cagg_energy_hourly()
+CREATE OR REPLACE FUNCTION ltss_energy.get_entities_for_cagg_energy_hourly()
 RETURNS text[]
 LANGUAGE sql
 IMMUTABLE
@@ -285,24 +307,23 @@ AS $function$
 $function$;
 ```
 
-Now CAGG definition, making use of the function above. Mind excluding textural states
+Now CAGG definition, making use of the function above. The CAGG makes use of counter_agg() function. It comes from timescaledb toolkit. And it's dedicated to handle data which values grows being reset from time to time. Also mind casting state which originally is a text, into a numeric datatype. To not make this cast fail, textual values like `'unavailable', 'unknown'` must be excluded.
 
 ```sql
-CREATE MATERIALIZED VIEW cagg_energy_hourly
+CREATE MATERIALIZED VIEW ltss_energy.cagg_energy_hourly
 WITH (timescaledb.continuous) AS
 SELECT
-  time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'::text) AS bucket,
-  entity_id,
-  delta(counter_agg("time", ((state)::NUMERIC)::DOUBLE PRECISSION)) AS value
+    time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'::text) AS bucket,
+    entity_id,
+    delta(counter_agg("time", state::::DOUBLE PRECISSION)) AS value
 FROM ltss
-WHERE entity_id = ANY (get_entities_for_cagg_energy_hourly())
-AND state NOT IN ('unavailable', 'unknown')
-FROM ltss
+WHERE entity_id = ANY (ltss_energy.get_entities_for_cagg_energy_hourly())
+  AND state NOT IN ('unavailable', 'unknown')
 GROUP BY bucket, entity_id
 WITH NO DATA;
 ```
 
-To check the definition of already created CAGG, execute the query:
+It might be useful to look at existing CAGG in order to check out its definition:
 
 ```sql
 SELECT * FROM timescaledb_information.continuous_aggregates;
@@ -310,25 +331,27 @@ SELECT * FROM timescaledb_information.continuous_aggregates;
 The `WITH NO DATA` clause makes the view be created immediately, but without computing its content. Without that clause, the view creation might take some time depending on the amount of data in the source table. If the CAGG has been created with no initial data population, generating it can be requested with a query:
 
 ```sql
-CALL refresh_continuous_aggregate('cagg_energy_hourly', NULL, NOW()-'2h'::INTERVAL);
+CALL refresh_continuous_aggregate('ltss_energy.cagg_energy_hourly', NULL, NOW()-'2h'::INTERVAL);
 ```
 
-Note: This query will run a background process. The NULL passed to the second parameter means ‘take data from the beginning`. The 3rd argument adds a 2-hour buffer to not interfere with data being added in real-time.
+Note: This query will run a background process. The NULL passed to the second parameter means ‘take data from the past`. The 3rd argument adds a 2-hour buffer to not interfere with data being added in real-time.
 
 There are several limitations when writing CAGGs. Most important to remember are:
 
 * inability to use non-immutable functions in the view query projection (after select), in predicates (WHERE clause), as well as in GROUP BY
 * Inability to use window functions
-* The two above lead to Inability to reference data from beyond of CAGG processing window (ie, direct preceding record)
+* The two above lead to inability to reference data from beyond of CAGG processing window (ie, direct preceding record)
 * need of using time_bucket()
-* Inability to use time_bucket_fillgapp() instead of time_bucket().It makes it impossible to interpolate or extrapolate missing data during CAGG calculations.
+* Inability to use time_bucket_fillgapp() instead of time_bucket().
 
-These limitations can be worked around, most effectively by handling such calculations during data retrieval for front-end visualization or reporting. This allows for flexibility while keeping the continuous aggregate definitions simple and efficient.
+All those limitations makes impossible to to interpolate or extrapolate missing data during CAGG calculations (are you recalling the issue described in HA sensors paragraph?).
+
+These limitations can be worked around, most effectively by handling such calculations later on, during data retrieval for front-end visualization or reporting. This allows for flexibility while keeping the continuous aggregate definitions simple and efficient.
 
 Hopefully, this article provides ready-to-use solutions so the reader doesn't need to worry about that.
 
 Ahh.. if there is a need to drop CAGG, dropping CAGG doesn’t drop the underlying hypertable. It has to be dropped manually.
-With the use of the continuous_aggregates view, find the hypertable:
+With the use of the `continuous_aggregates` view, find the hypertable:
 
 ```sql
 SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name)
@@ -355,7 +378,7 @@ But for us, the most useful is to set CAGGs update policy, which ensures automat
 
 ```sql
 SELECT add_continuous_aggregate_policy(
-   'cagg_energy_hourly',
+   'ltss_energy.cagg_energy_hourly',
    start_offset => '1 hour'::INTERVAL,
    end_offset => '15 minutes'::INTERVAL,
    schedule_interval => '15 minutes'::INTERVAL
@@ -395,7 +418,7 @@ This ensures that your queries always return up-to-date results, even if the con
 By default, real-time aggregation is disabled, but you can easily turn it on (or off) at any time:
 
 ```sql
-ALTER MATERIALIZED VIEW cagg_energy_hourly
+ALTER MATERIALIZED VIEW ltss_energy.cagg_energy_hourly
 SET (timescaledb.materialized_only = false);
 ```
 
@@ -426,13 +449,13 @@ In our use case, we don’t need complicated dependency chains.
 Instead, we can define a daily CAGG based on the existing hourly CAGG with just a few lines of SQL:
 
 ```sql
-CREATE MATERIALIZED VIEW cagg_energy_daily
+CREATE MATERIALIZED VIEW ltss_energy.cagg_energy_daily
 WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 day'::interval, bucket) AS bucket,
     entity_id,
     SUM(value) AS value
-FROM cagg_energy_hourly
+FROM ltss_energy.cagg_energy_hourly
 GROUP BY time_bucket('1 day'::interval, bucket), entity_id;
 ```
 
@@ -441,7 +464,7 @@ To keep it automatically updated, add a continuous aggregation policy:
 ```sql
 SELECT add_continuous_aggregate_policy
 (
-   'cagg_energy_daily',
+   'ltss_energy.cagg_energy_daily',
    start_offset => '1 day::INTERVAL',
    end_offset => '4 hours'::INTERVAL,
    schedule_interval => '2 hours'::INTERVAL
@@ -451,7 +474,7 @@ SELECT add_continuous_aggregate_policy
 And don’t forget to enable real-time aggregation if needed:
 
 ```sql
-ALTER MATERIALIZED VIEW cagg_energy_daily
+ALTER MATERIALIZED VIEW ltss_energy.cagg_energy_daily
 SET (timescaledb.materialized_only = false);
 ```
 
@@ -593,10 +616,13 @@ SELECT
     ) AS timeb,
     entity_id,
     sum(value) AS value
-FROM cagg_energy_hourly
-WHERE entity_id  IN ('sensor.pg_mainhouse_total_energy_energy_hourly',
-'sensor.pg_cube_total_energy_energy_hourly')
-AND $__timeFilter("bucket")
+FROM ltss_energy.cagg_energy_hourly
+WHERE entity_id  IN 
+      (
+          'sensor.pg_mainhouse_total_energy_energy_hourly',
+          'sensor.pg_cube_total_energy_energy_hourly'
+      )
+  AND $__timeFilter("bucket")
 GROUP BY timeb, entity_id
 ```
 
@@ -668,6 +694,7 @@ This variable will automatically determine the granularity based on the time ran
 * Name: query_granularity
 * Description: Determines how to group the data based on the selected time range.
 * Query: 
+
 ```sql
 SELECT 
     CASE WHEN '$granularity'  = 'Auto' THEN
@@ -733,7 +760,7 @@ SELECT
     ) AS timeb,
     entity_id,
     SUM(value) AS value
-FROM cagg_energy_${name_granularity}
+FROM ltss_energy.cagg_energy_${name_granularity}
 WHERE entity_id  IN ('sensor.energy_injected_hourly', 'sensor.energy_purchased_hourly')
 AND $__timeFilter("bucket")
 GROUP BY timeb, entity_id
@@ -774,7 +801,7 @@ SELECT
         WHEN entity_id ~ '_discharged' THEN 'Discharged'
     END AS entityid2,
     SUM(value) AS value
-FROM cagg_energy_${name_granularity}
+FROM ltss_energy.cagg_energy_${name_granularity}
 WHERE entity_id  IN (
 'sensor.energy_injected_hourly',
 'sensor.energy_purchased_hourly',
@@ -824,7 +851,7 @@ This approach has multiple benefits at the start.
 
 Here is a structure of the table:
 ```sql
-CREATE TABLE public.electricity_cost
+CREATE TABLE ltss_energy.electricity_cost
 (
     cost_type TEXT NOT NULL,
     cost_kind TEXT NULL,
@@ -834,7 +861,7 @@ CREATE TABLE public.electricity_cost
     CONSTRAINT exc_electricitycost_costrange EXCLUDE USING gist (cost_type WITH =, cost_kind WITH =, cost_range WITH &&),
     CONSTRAINT pk_electricitycost PRIMARY KEY (cost_type, cost_range)
 );
-CREATE INDEX exc_electricitycost_costrange ON public.electricity_cost USING gist (cost_type, cost_kind, cost_range);
+CREATE INDEX exc_electricitycost_costrange ON ltss_energy.electricity_cost USING gist (cost_type, cost_kind, cost_range);
 ```
 
 Note that exc_electricitycost_costrange, which constraint that prevents the creation of overlapping ranges for the same cost type and kind. It creates the index named the same way.
@@ -864,7 +891,7 @@ Thanks to time stored as a range type (BTW another powerful PostgreSQL feature),
 I made a helper function that calculates the cost of the given energy and time.
 
 ```sql
-CREATE OR REPLACE FUNCTION public.calculate_cost
+CREATE OR REPLACE FUNCTION ltss_energy.calculate_cost
 (
    _cost_type  TEXT,
    _time       TIMESTAMPTZ,
@@ -873,12 +900,12 @@ CREATE OR REPLACE FUNCTION public.calculate_cost
 RETURNS NUMERIC
 LANGUAGE sql
 IMMUTABLE
-AS $function$
+AS $$
    SELECT SUM(cost_value * _value)
-   FROM electricity_cost
+   FROM ltss_energy.electricity_cost
    WHERE _time::DATE <@ cost_range
      AND cost_type = _cost_type
-$function$;
+$$;
 ```
 
 Let’s do some graphs now.
@@ -891,7 +918,7 @@ Since the table with prices contains ranges, not points in time, these must be g
 
 ```sql
 SELECT time, cost_type, cost_kind, cost_value
-FROM electricity_cost AS ec
+FROM ltss_energy.electricity_cost AS ec
 JOIN generate_series
      (
           to_timestamp($__from/1000)::DATE::TIMESTAMPTZ,
@@ -927,7 +954,7 @@ SELECT
     END AS entityid2,
     SUM
     (
-        calculate_cost
+        ltss_energy.calculate_cost
         (
             CASE WHEN entity_id ~ 'injected' THEN 'sale'
                  WHEN entity_id ~ 'purchased' THEN 'purchase'
@@ -936,7 +963,7 @@ SELECT
             bucket, value::NUMERIC
         )
     ) AS value
-FROM cagg_energy_${name_granularity}
+FROM ltss_energy.cagg_energy_${name_granularity}
 WHERE entity_id IN
 (
     'sensor.energy_injected_hourly',
@@ -989,7 +1016,7 @@ src AS
     END AS entityid2,
     SUM(CASE
             WHEN bucket < '2024-08-08' THEN 0
-            ELSE calculate_cost
+            ELSE ltss_energy.calculate_cost
                 (
                     CASE WHEN entity_id ~ 'injected' THEN 'sale'
                         WHEN entity_id ~ 'purchased' THEN 'purchase'
@@ -999,7 +1026,7 @@ src AS
                     value::NUMERIC
                 )
         END) AS value
-    FROM cagg_energy_${name_granularity}
+    FROM ltss_energy.cagg_energy_${name_granularity}
     WHERE entity_id  IN (
                             'sensor.energy_injected_hourly',
                             'sensor.energy_purchased_hourly',
