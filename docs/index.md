@@ -137,13 +137,13 @@ CREATE EXTENSION IF NOT EXISTS timescaledb_toolkit;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 ```
 
-:bulb: By installting the `postgis` extention, we avoiding the need of giving LTSS component superuser privileges (which is trying to install the extention otherwise)
+:bulb: By installting the `postgis` extention, we avoiding the need of giving LTSS component superuser privileges (which is attempting to install the extension otherwise).
 
 The `timescaledb_toolkit` enables additional time-series features. They are needed to to work with continuously increasing energy values, like energy.
 
 The `btree_gist` will be needed later on for cost reports creation.
 
-At the next step, let's create a dedicated schema. We will create all new objects in this schema to maintain clarity.
+At the next step, let's create a dedicated schema. We will create new objects in this schema to maintain clarity.
 ```sql
 CREATE SCHEMA ltss_energy;
 ```
@@ -157,13 +157,13 @@ CREATE ROLE ha LOGIN PASSWORD 'some_password';
 LTSS is the Home Assistant's custom component. It can be installed by HACS. 
 Installation instructions are available in [project Github](https://github.com/freol35241/ltss?tab=readme-ov-file#installation).
 
-LTSS writes all data into a single table: `public.ltss` (without option to change). In the article will be referenced just as `ltss` since schema `public` ussually doesn't need to be referenced.
+LTSS writes all data into a single table: `public.ltss` (without option to change). In the article, the table will be referenced just as `ltss` since schema `public` ussually doesn't need to be explicitely referenced.
 
-During start, the LTSS checks existence of `ltss` table. If doesn't exist, it creates it as well as adds `postgis` extension to the database. For the latter operation, it requires superuser privilges
+During start, the LTSS checks existence of `ltss` table. If doesn't exist, it creates it as well as adds `postgis` extension to the database. For the latter operation, it requires superuser privilges. But as you remember, we already has installed it. 
 
-Once LTSS is installed, configure it to export all sensors you need to TimescaleDB 
+Once LTSS is installed, configure it to publish all needed sensors to TimescaleDB.
 
-> :warning: configuration change requires HA restart. 
+> :warning: LTSS configuration changes require HA restart. 
 
 Configuration of LTSS typically involves selecting the appropriate sensors in the integration’s configuration in configuration.yaml.
 
@@ -356,7 +356,7 @@ With the use of the `continuous_aggregates` view, find the hypertable:
 ```sql
 SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name)
 FROM timescaledb_information.continuous_aggregates
-WHERE hypertable_name = '<cagg_name>'
+WHERE hypertable_name = '<cagg_name>';
 ```
 
 Then drop the materialized view and the hypertable using general PostgreSQL syntax:
@@ -443,9 +443,7 @@ Here's a conceptual diagram (borrowed from the TimescaleDB blog):
 
 ![|191x250](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfqi-06JEio27didAnjeV7rrWtVvFhZuAAhGeNrJWTwTFg6laufqaxuyV6wWKz7H_uvEwMN25ovEvpA_SHNWFtAimqVQZyAoxOH8CWp7JHCt3tkUBb8iztw0BqJKIcVGuRihQoP?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
-Our Case: A Simple Daily CAGG
-
-In our use case, we don’t need complicated dependency chains.
+In our use case, we don’t need as complicated dependency chains as above.
 Instead, we can define a daily CAGG based on the existing hourly CAGG with just a few lines of SQL:
 
 ```sql
