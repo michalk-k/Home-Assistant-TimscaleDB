@@ -197,7 +197,7 @@ Anyway, here is an example of such a trigger:
 CREATE OR REPLACE FUNCTION ltss_exclude_entities()
 RETURNS TRIGGER
 LANGUAGE plpgsql
-AS $code$
+AS $$
 BEGIN
     -- Filter out unwanted entities before insertion
     IF NEW.entity_id NOT IN 
@@ -211,7 +211,7 @@ BEGIN
    
     RETURN NEW;
 END;
-$code$;
+$$;
 
 
 CREATE TRIGGER ltss_exclude_entities
@@ -226,7 +226,7 @@ HA sensors often include extensive and unnecessary metadata in their attributes 
 CREATE OR REPLACE FUNCTION ltss_strip_attributes()
 RETURNS TRIGGER
 LANGUAGE plpgsql
-AS $code$
+AS $$
 BEGIN
     -- Keep only 'unit_of_measurement' in the attributes JSONB
     IF NEW.attributes ? 'unit_of_measurement'
@@ -243,7 +243,7 @@ BEGIN
 
     RETURN NEW;
 END;
-$code$;
+$$;
 
 
 CREATE TRIGGER ltss_strip_attributes
@@ -292,7 +292,7 @@ CREATE OR REPLACE FUNCTION ltss_energy.get_entities_for_cagg_energy_hourly()
 RETURNS text[]
 LANGUAGE sql
 IMMUTABLE
-AS $function$
+AS $$
    SELECT ARRAY
        [
            'sensor.pg_mainhouse_total_energy_energy_hourly',
@@ -304,7 +304,7 @@ AS $function$
            'sensor.energy_discharged_from_battery_hourly',
            'sensor.energy_charged_to_battery_hourly'
        ];
-$function$;
+$$;
 ```
 
 Now CAGG definition, making use of the function above. The CAGG makes use of counter_agg() function. It comes from timescaledb toolkit. And it's dedicated to handle data which values grows being reset from time to time. Also mind casting state which originally is a text, into a numeric datatype. To not make this cast fail, textual values like `'unavailable', 'unknown'` must be excluded.
@@ -794,22 +794,22 @@ SELECT
         '$query_granularity'::interval,      
         "bucket", 'Europe/Prague'
     ) AS timeb,
-    CASE WHEN entity_id ~ 'injected' THEN 'Injected'
-        WHEN entity_id ~ 'purchased' THEN 'Purchased'
-        WHEN entity_id ~ 'pv[12]' THEN 'PV'
-        WHEN entity_id ~ '_charged' THEN 'Charged'
+    CASE WHEN entity_id ~ 'injected'   THEN 'Injected'
+        WHEN entity_id ~ 'purchased'   THEN 'Purchased'
+        WHEN entity_id ~ 'pv[12]'      THEN 'PV'
+        WHEN entity_id ~ '_charged'    THEN 'Charged'
         WHEN entity_id ~ '_discharged' THEN 'Discharged'
     END AS entityid2,
     SUM(value) AS value
 FROM ltss_energy.cagg_energy_${name_granularity}
 WHERE entity_id  IN (
-'sensor.energy_injected_hourly',
-'sensor.energy_purchased_hourly',
-'sensor.wattsonic_pv1_input_energy_2_hourly',
-'sensor.wattsonic_pv2_input_energy_2_hourly',
-'sensor.energy_charged_to_battery_hourly',
-'sensor.energy_discharged_from_battery_hourly'
-)
+                        'sensor.energy_injected_hourly',
+                        'sensor.energy_purchased_hourly',
+                        'sensor.wattsonic_pv1_input_energy_2_hourly',
+                        'sensor.wattsonic_pv2_input_energy_2_hourly',
+                        'sensor.energy_charged_to_battery_hourly',
+                        'sensor.energy_discharged_from_battery_hourly'
+                    )
 AND $__timeFilter("bucket")
 GROUP BY timeb, entityid2
 ```
@@ -869,26 +869,26 @@ Note that exc_electricitycost_costrange, which constraint that prevents the crea
 For this, it’s needed to have the `btree_gist` extension installed (see the beginning of this article).
 
 The table is populated with data (example from my installation). Units are informative (but might be used for recalculation if one needs that). Note, pricelists usually contain prices for MWh. If you maintain energy in kWh like me, those numbers need to be divided by 1000.
-```
-cost_type|cost_range             |cost_value|cost_unit|cost_kind   |
----------+-----------------------+----------+---------+------------+
-purchase |[2023-08-29,2023-11-01)|   4.69834|kWh      |energy      |
-purchase |[2023-11-01,2024-03-20)|   4.28925|kWh      |energy      |
-purchase |[2024-03-20,2024-08-01)|   3.75537|kWh      |energy      |
-purchase |[2024-08-01,2024-08-08)|     3.618|kWh      |energy      |
-purchase |[2024-08-08,2026-01-01)|   2.99008|kWh      |energy      |
-purchase |[2023-08-29,2024-01-01)|     1.611|kWh      |distribution|
-purchase |[2024-01-01,2024-08-06)|   2.01566|kWh      |distribution|
-purchase |[2024-08-06,2025-01-01)|   2.01566|kWh      |distribution|
-purchase |[2025-01-01,infinity]  |   2.09963|kWh      |distribution|
-sale     |[2024-08-08,2025-04-01)|       1.4|kWh      |energy      |
-sale     |[2025-04-01,infinity)  |      1.21|kWh      |energy      |
-```
+
+
+|cost_type|cost_kind   |cost_range             |cost_value|cost_unit|
+|---------|------------|-----------------------|----------|---------|
+|purchase |energy      |[2023-08-29,2023-11-01)|   4.69834|kWh      |
+|purchase |energy      |[2023-11-01,2024-03-20)|   4.28925|kWh      |
+|purchase |energy      |[2024-03-20,2024-08-01)|   3.75537|kWh      |
+|purchase |energy      |[2024-08-01,2024-08-08)|     3.618|kWh      |
+|purchase |energy      |[2024-08-08,2026-01-01)|   2.99008|kWh      |
+|purchase |distribution|[2023-08-29,2024-01-01)|     1.611|kWh      |
+|purchase |distribution|[2024-01-01,2024-08-06)|   2.01566|kWh      |
+|purchase |distribution|[2024-08-06,2025-01-01)|   2.01566|kWh      |
+|purchase |distribution|[2025-01-01,infinity]  |   2.09963|kWh      |
+|sale     |energy      |[2024-08-08,2025-04-01)|       1.4|kWh      |
+|sale     |energy      |[2025-04-01,infinity)  |      1.21|kWh      |
 
 
 Thanks to time stored as a range type (BTW another powerful PostgreSQL feature), it’s very easy to match particular records depending on measurement time.
 
-I made a helper function that calculates the cost of the given energy and time.
+I made a helper function that calculates the cost of the energy at certain time.
 
 ```sql
 CREATE OR REPLACE FUNCTION ltss_energy.calculate_cost
