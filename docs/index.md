@@ -57,34 +57,25 @@ To get started, ensure the following components are installed and configured:
 
 ### Home Assistant Sensors
 
-Before we move on, this topic deserves a bit of extra explanation.
-LTSS doesn't publish long-term values. Only real-time values from original sensors, and only at the moment the sensor gets a new value.
-Home assistant records energy as a continuously increasing value. It may reset to zero. Then it increases again.
-The energy might be reported by external devices or calculated from reported power.
+Before we move on, with database, we need to aknowledge the data character. 
+In general, energy data tracked by Home Assistant sensors grows in time indefinitely. Optionally it's allowed that from time to time the value is reset to zero and starts counting again. The reset can be triggered by measurement device or by HA itself (utility sensors) at any time.
 
-The frequency of updates is not pre-determined, but depends mostly on source devices providing those values. It might be one sample per hour or 10 samples per second.
+It's important to understand this concept, because it makes common methods like sum or delta not applicable to such evolving data. Managing it using common SQL might be pretty complex. 
+TimescaleDB comes with tools which helps with that.
 
-Our goal is to collect energy for a specific period, such as an hour, a day, or a weekend.
-In an ideal world, where we had infinitely dense data (measurements at every possible moment), we could calculate energy usage for any period at any time.
-But with sparse data (only occasional measurements), it's technically impossible to do this accurately without interpolation.
-
-Let's imagine this simple timeline of energy consumption measurements:
-
+There is one isse more to mention and solve: data changes are reported with finite frequency (granularity). It causes "skipping" some energy when attempting to group data by some intervals. Let's look at the diagram:
 ```
-time ────o─────o─o─────o─────|───────o─────o─────o────o────>
-                       x  midnight   y
+          0     5     12           15     23
+time ─|───o─────o─────o─────|───────o─────o─────|────>
+                      x  midnight   y
 ```
-Here:
-
-* "o" represents an energy data point (sensor reading)
-* x is the last reading before midnight
-* y is the first reading after midnight
-
-Suppose we want to calculate total energy usage for the day (midnight to midnight).
-With data distributed as in the picture, it's impossible to precisely determine:
+Suppose we want to calculate total energy usage for the day (midnight to midnight). With data distributed as in the picture, it's impossible to precisely determine:
 
 * the energy used between x and midnight
 * the energy used between midnight and y
+* the energy of each day
+
+Simple grouping by day would result in 12 units during the first day and 8 units in the second one. 3 units are lost.
 
 You could try to interpolate (estimate) these missing parts, but for our case (explained later), interpolation isn't the way to go.
 Sometimes your energy readings will be frequent enough that the error is small, but you can’t always count on that.
@@ -98,16 +89,16 @@ We can use Home Assistant's Utility Meters. Based on my observations:
 
 In the result, the value at y represents the delta (the amount of energy used) between x and y.
 This method causes energy from before the end of the period to be accounted for in the next one.
-
-Worth mentioning that
-* The value of utility energy sensors continuously increases (until the next reset).
-* All utility sensors (regardless of reset time interval) based on the same source sensor are updated at the same rate as the source sensor.
-
-It renders into conclusion that there is no need to publish daily sensors together with hourly ones. The shortest time utility sensor is enough to cover our needs, since we can make daily values out of hourly ones.
+```
+          0     5     12     0      3     7
+time ─|───o─────o─────o─────|o──────o─────o─────|────>
+                      x  midnight   y
+```
+Worth mentioning that utility sensors (regardless of reset time interval) based on the same source sensor are updated at the same rate as the source sensor. It renders into conclusion that there is no need to publish daily sensors if there is hourly one. The shortest period utility sensor is enough to cover our needs, since we can make daily values out of hourly ones.
 
 **Note:**
 In this article, we assume hourly data as the baseline.
-This is usually enough for most use cases, unless you're dealing with high-frequency needs like quarter-hourly data (for example, spot market energy trading).
+This could be considered enough for most use cases, unless you're dealing with other needs like quarter-hourly data for often used for spot market energy trading.
 
 ### Consistent Units for Energy Sensors
 
