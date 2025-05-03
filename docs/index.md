@@ -193,7 +193,7 @@ The configuration is similar to what the recorder offers, including globs. Unfor
 Anyway, here is an example of such a trigger:
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_exclude_entities()
+CREATE OR REPLACE FUNCTION public.ltss_exclude_entities()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
@@ -214,15 +214,15 @@ $$;
 
 
 CREATE TRIGGER ltss_exclude_entities
-BEFORE INSERT ON ltss
+BEFORE INSERT ON public.ltss
 FOR EACH ROW
-EXECUTE FUNCTION ltss_filter_trigger();
+EXECUTE FUNCTION public.ltss_exclude_entities();
 ```
 
 HA sensors often include extensive and unnecessary metadata in their attributes field. These attributes are stored as JSONB in the database, which can significantly increase disk usage. If the additional metadata is not essential for your use case, it's wise to strip it away to optimize storage. Below is a trigger that retains only the unit_of_measurement attribute, which is typically the most relevant, thereby minimizing storage overhead caused by extraneous data:
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_strip_attributes()
+CREATE OR REPLACE FUNCTION public.ltss_strip_attributes()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
@@ -246,18 +246,18 @@ $$;
 
 
 CREATE TRIGGER ltss_strip_attributes
-BEFORE INSERT ON ltss
+BEFORE INSERT ON public.ltss
 FOR EACH ROW
-EXECUTE FUNCTION ltss_strip_attributes();
+EXECUTE FUNCTION public.ltss_strip_attributes();
 ```
 
 This trigger is especially useful when storing large amounts of sensor data where the attributes field may otherwise bloat the database.
 Note, there is another tool to manage a large amount of data: compression (described later).
 
-# Understanding the TimescaleDB Architecture
+# Working with TimescaleDB
 
 ## Hypertables
-The TimescaleDB introduces a so-called hypertable. For a lot of use cases, it behaves like a traditional table, including DML operations. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
+The TimescaleDB introduces new table engine, so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
 
 **Hypertable Features:**
 
@@ -276,24 +276,25 @@ Continuous Aggregates (CAGGs) are materialized views that maintain aggregated da
 * Allowing old data deletion from the source table, without affecting reports
 * Being based on hypertables, CAGGs data can be compressed (or removed after some time, which is not what we need though)
 
-Earlier in the article I mentioned, that utility sensors refreshing with the same rate as source sensors. It's not impossible that single sensor generates 10MB of data daily. It all depends on changes frequency.
+Earlier in the article I mentioned, that utility sensors refreshing with the same rate as source sensors. It's not impossible that single sensor generates 10MB of daily data if the changes are so frequent.
 
 > :bulb: Thanks to CAGGs, we will transform that amount of data into single value per defined time period. 
 
 ### Defining Continuous Aggregates
 
-Before we jump into CAGGs, let’s start with a helper function. Believe me or not, changing entity names, renaming them, is something that just happens, especially at the beginning of the setup. For example, I found that it’s better to have a generic name for injected/purchased energy rather than use names dependent on a measuring device. This way I can cover pre-FV a FV eras together.
+Before we jump into CAGGs, let’s start with a helper function. Believe me or not, changes to processed entity names, renaming them, is something that just happens, especially at the beginning of the setup. For example, I found that it’s better to have a generic name for injected/purchased energy rather than use names dependent on a measuring device. I renamed them in HA, but then needed to reflect the change in a CAGG. Other situation was the need to cover pre-FV a FV eras together.
 
-Anyway, I found out that it’s easier to add a new sensor name or manipulate its name when the list of sensors is provided by the utility function, rather than hardcoded within a CAGG. There is no option to update the statement of the materialized view. At the same time, the function can be replaced at any time. Note the IMMUTABLE keyword in this function definition.
+Anyway, I found out that it’s easier to add a new sensor name or manipulate its name when the list of sensors is provided by the utility function, rather than hardcoded within a CAGG. There is no option to update the statement of the materialized view. At the same time, the function can be replaced at any time. Notice the IMMUTABLE keyword in this function definition.
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_energy.get_entities_for_cagg_energy_hourly()
+CREATE OR REPLACE FUNCTION ltss_energy.get_entities_for_cagg_energy()
 RETURNS text[]
 LANGUAGE sql
 IMMUTABLE
 AS $$
    SELECT ARRAY
        [
+            -- replace sensor names with your ones.
            'sensor.pg_mainhouse_total_energy_energy_hourly',
            'sensor.pg_cube_total_energy_energy_hourly',
            'sensor.energy_injected_hourly',
@@ -306,7 +307,7 @@ AS $$
 $$;
 ```
 
-Now CAGG definition, making use of the function above. The CAGG makes use of counter_agg() function. It comes from timescaledb toolkit. And it's dedicated to handle data which values grows being reset from time to time. Also mind casting state which originally is a text, into a numeric datatype. To not make this cast fail, textual values like `'unavailable', 'unknown'` must be excluded.
+Now CAGG definition, making use of the function above. The CAGG makes use of a `counter_agg()` function. It comes from timescaledb toolkit. And it's dedicated to handle data of which values grow indefinitely, being reset sometimes. Also notice casting `state` value into numeric data type (HA provides it as a text). To not make this cast fail, textual values like `'unavailable', 'unknown'` must be excluded.
 
 ```sql
 CREATE MATERIALIZED VIEW ltss_energy.cagg_energy_hourly
@@ -316,7 +317,7 @@ SELECT
     entity_id,
     delta(counter_agg("time", state::::DOUBLE PRECISSION)) AS value
 FROM ltss
-WHERE entity_id = ANY (ltss_energy.get_entities_for_cagg_energy_hourly())
+WHERE entity_id = ANY (ltss_energy.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
 GROUP BY bucket, entity_id
 WITH NO DATA;
@@ -340,10 +341,10 @@ There are several limitations when writing CAGGs. Most important to remember are
 * inability to use non-immutable functions in the view query projection (after select), in predicates (WHERE clause), as well as in GROUP BY
 * Inability to use window functions
 * The two above lead to inability to reference data from beyond of CAGG processing window (ie, direct preceding record)
-* need of using time_bucket()
-* Inability to use time_bucket_fillgapp() instead of time_bucket().
+* need of using `time_bucket()`
+* Inability to use `time_bucket_fillgapp()` instead of time_bucket().
 
-All those limitations makes impossible to to interpolate or extrapolate missing data during CAGG calculations (are you recalling the issue described in HA sensors paragraph?).
+All those limitations makes impossible to interpolate or extrapolate missing data during CAGG calculations (are you recalling the issue described in HA sensors paragraph?).
 
 These limitations can be worked around, most effectively by handling such calculations later on, during data retrieval for front-end visualization or reporting. This allows for flexibility while keeping the continuous aggregate definitions simple and efficient.
 
@@ -358,7 +359,7 @@ FROM timescaledb_information.continuous_aggregates
 WHERE hypertable_name = '<cagg_name>';
 ```
 
-Then drop the materialized view and the hypertable using general PostgreSQL syntax:
+Then drop the materialized view and the hypertable using common PostgreSQL syntax:
 
 ```sql
 DROP MATERIALIZED VIEW <cagg_name> CASCADE;
@@ -384,20 +385,20 @@ SELECT add_continuous_aggregate_policy(
 );
 ```
 
-To improve performance, CAGG takes data for calculation only from the specified time range declared with two time offsets: start_offset and end_offset. Both are in the past, and relative to the moment of scheduled processing.
+To improve performance, CAGG takes data for calculation only from the specified time range declared with two time offsets: `start_offset` and `end_offset`. Both are in the past, and relative to the moment of scheduled processing.
 
 ```
 time —>———————|——————————————|———————————————|———————————|
-         start offset   end offset     scheduled now    now
+         start offset   end offset     scheduled time   now
 ```
 
-* start_offset: defines the lower boundary of how far back in time data should be refreshed. It also enables safe data deletion of older chunks from the origin hypertable. Otherwise, removing old data from the source table would be reflected in CAGG results.
-* end_offset: defines the upper boundary of how far back in time data should be refreshed. It also prevents race conditions with incoming data. Aggressive end_offset values might miss performance expectations due to frequent refreshes.
-* schedule_interval: How often should CAGG be refreshed
+* `start_offset`: defines the lower boundary of how far back in time data should be refreshed. It also enables safe data deletion of older chunks from the origin hypertable. Otherwise, removing old data from the source table would be reflected in CAGG results.
+* `end_offset`: defines the upper boundary of how far back in time data should be refreshed. It also prevents race conditions with incoming data. Aggressive end_offset values might miss performance expectations due to frequent refreshes.
+* `schedule_interval`: How often should CAGG be refreshed
 
-Because data coming from HA is appending only (no updates nor deletes), setting the policy is not so crucial, thus easier.
+Data coming from HA is appending only (no updates nor deletes), thus the policy might be set like this:
 
-* For hourly aggregates: `start_offset = 1 hour, end_offset = 15 minutes, schedule_interval = 15` minutes
+* For hourly aggregates: `start_offset = 1 hour, end_offset = 15 minutes, schedule_interval = 15 minutes`
 * For daily aggregates: `start_offset = 1 day, end_offset = 4 hours, schedule_interval = 2 hours`
 
 ### Real-Time Aggregates
@@ -406,13 +407,15 @@ One valid concern with the configuration we discussed earlier is that queries ag
 
 And let's be honest — everyone wants real-time data in Grafana, right?
 
-Luckily, TimescaleDB provides a solution: real-time aggregates.
+Luckily, TimescaleDB provides a solution: **real-time aggregates**.\
 When real-time aggregation is enabled, the database automatically blends:
 
 * Precomputed (materialized) data
 * The most recent raw records
 
-This ensures that your queries always return up-to-date results, even if the continuous aggregate hasn't been refreshed yet.
+Think of it like this: it’s as if TimescaleDB performs an automatic union between your CAGG and the source table for the missing interval.
+
+This ensures that queries against CAGG always return up-to-date results, even if the continuous aggregate hasn't been refreshed yet.
 
 By default, real-time aggregation is disabled, but you can easily turn it on (or off) at any time:
 
@@ -420,10 +423,6 @@ By default, real-time aggregation is disabled, but you can easily turn it on (or
 ALTER MATERIALIZED VIEW ltss_energy.cagg_energy_hourly
 SET (timescaledb.materialized_only = false);
 ```
-
-Think of it like this:
-
-It’s as if TimescaleDB performs an automatic union between your CAGG and the source table for the missing interval.
 
 This way, you get the best of both worlds — high performance for historical data and freshness for new data.
 
@@ -514,7 +513,7 @@ SET
 SELECT add_compression_policy('ltss', compress_after => '30d'::INTERVAL);
 ```
 
-This setup will automatically compress data older than 30 days.
+This setup will automatically compress data chunks older than 30 days.
 
 ### Checking Compression Stats
 
@@ -579,8 +578,8 @@ SELECT add_compression_policy('<cagg_name>', compress_after=>'45 days'::INTERVAL
 ```
 This approach cleanly integrates compression into the automatic maintenance of your CAGGs.
 
-Reminder:
-Make sure the compress_after setting points further back in time than the start_offset you configured for add_continuous_aggregate_policy().
+⚠️ Reminder:\
+Make sure the `compress_after` setting points further back in time than the `start_offset` you configured for `add_continuous_aggregate_policy()`.
 Otherwise, compression could interfere with the automatic refresh of newer data.
 
 ## Data retention
@@ -612,7 +611,7 @@ SELECT
         "bucket", 'Europe/Prague'
     ) AS timeb,
     entity_id,
-    sum(value) AS value
+    SUM(value) AS value
 FROM ltss_energy.cagg_energy_hourly
 WHERE entity_id  IN 
       (
@@ -623,13 +622,13 @@ WHERE entity_id  IN
 GROUP BY timeb, entity_id
 ```
 
-$__timeFilter("bucket") is a Grafana macro that automatically adjusts the time range based on the dashboard’s time selection. Grafana internally converts it to an expression like:
+The `$__timeFilter("bucket")` is a Grafana macro that automatically adjusts the time range based on the dashboard’s time selection. Grafana internally converts it to an expression like:
 ```sql
 "bucket" BETWEEN '2022-12-31T23:00:00Z' AND '2025-04-27T08:37:12.797Z'
 ```
 This ensures that your query only pulls data for the selected time range.
 
-Transformations for Data Formatting
+**Transformations for Data Formatting**
 
 Once the query is set, it's time to adjust the data in Grafana. The next step involves using the Transformations tab in Grafana to manipulate the data into the right format for visualization.
 
@@ -647,11 +646,11 @@ Once the query is set, it's time to adjust the data in Grafana. The next step in
 
 **Configuring the Visualization**
 
-Now it’s time to configure the visualization itself. In this case, a Bar Chart is the most suitable type of graph for displaying the consumption data.
+Now it’s time to configure the visualization itself. In this case, a Bar Chart is the most suitable type of graph for displaying the consumption in time interval.
 
-* If you’re visualizing data from multiple sensors, you might want to use the Stacking mode for the bars.
+💡 If you’re visualizing data from multiple sensors, you might want to use the Stacking mode for the bars.
 
-* Important Note: Stacking mode requires that all axes share the same time intervals. If the time intervals are different, the bars won’t stack correctly. This is why we use the time_bucket_gapfill() function in the query, which ensures consistent time intervals, even if data is missing for certain periods.
+💡 Important Note: Stacking mode requires that all axes share the same time intervals. If the time intervals are different, the bars won’t stack correctly. This is why we use the time_bucket_gapfill() function in the query, which ensures consistent time intervals, even if data is missing for certain periods.
 
 By following these steps, you can easily visualize the total energy consumption in your house and make the data more insightful in Grafana!
 
@@ -659,7 +658,7 @@ By following these steps, you can easily visualize the total energy consumption 
 
 Previously, we visualized daily results based on hourly CAGGs. Now, let’s enhance the visualization with a dynamic data source selection and the ability to choose the aggregation level (hourly, daily, monthly, annually) based on user input or time range.
 
-Understanding Grafana’s dynamic setup can take some time, but I’ll provide a ready-to-use solution to achieve this functionality.
+Understanding Grafana’s dynamic setup may take some time, but I’ll provide a ready-to-use solution to achieve this functionality.
 
 **Define Variables in Grafana**
 
@@ -674,14 +673,9 @@ Understanding Grafana’s dynamic setup can take some time, but I’ll provide a
 * Name: granularity
 * Description: List of available granularity types (auto, hourly, daily, etc.)
 * Show on Dashboard: Label and Value
-* Custom Options:
-  * Auto
-  * hour: 1 hour
-  * day: 1 day
-  * month: 1 month
-  * year: 1 year
+* Custom Options: `Auto, hour: 1 hour, day: 1 day, month: 1 month, year: 1 year`
 
-This variable allows the user to manually select the granularity they want to use for the data aggregation.
+This variable will allows the user to manually select the granularity he/she wants to see on the graph. The `Auto` will cause selecting the granularity automatically based on selected time range.
 
 **Variable 2: Query Granularity**
 
@@ -718,7 +712,7 @@ The preview should show exactly this:
 
 **Variable 3: Name Granularity**
 
-The purpose of this variable is to ensure the correct CAGG table is selected based on the granularity. Since our CAGGs follow a naming convention (e.g., cagg_energy_hourly, cagg_energy_daily), we can replace the suffix of the table name based on the selected granularity.
+The purpose of this variable is to ensure the most suitable CAGG is used for requested granularity. Since our CAGGs follow a naming convention (e.g., cagg_energy_hourly, cagg_energy_daily), we can just replace the suffix of the CAGG name to achieve that.
 
 * Type: Query
 * Name: name_granularity
@@ -745,20 +739,20 @@ This visualization shows the amount of energy purchased and injected. In basics,
 
 ![|602x227](https://lh7-rt.googleusercontent.com/docsz/AD_4nXeSEQiC2frGlHPRGgGjHpHV8mtD9Zy_eDCQ_YoYXclr4c1A1wsgPdzkUNGILqZECrfLrYAatCZb20Tsl77t3TNRtVV3zNsoTlZE6AiLC3cYW4ra9KMTuQCntYW0uT16i5Agr_uY?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
-The main difference is in the query, which uses the recently prepared variables
+Here is a query, applying newly created variables:
 
 ```sql
 SELECT
     time_bucket_gapfill
     (
-        '$query_granularity'::interval,      
+        '$query_granularity'::INTERVAL,      
         "bucket",
         'Europe/Prague'
     ) AS timeb,
     entity_id,
     SUM(value) AS value
 FROM ltss_energy.cagg_energy_${name_granularity}
-WHERE entity_id  IN ('sensor.energy_injected_hourly', 'sensor.energy_purchased_hourly')
+WHERE entity_id IN ('sensor.energy_injected_hourly', 'sensor.energy_purchased_hourly')
 AND $__timeFilter("bucket")
 GROUP BY timeb, entity_id
 ```
@@ -769,18 +763,18 @@ To separate injected and purchased data, I decided to show injected energy on th
 
 ![|371x273](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfuVgxubHt7mte15MV_yyAdxmpwdGKJXXvhwg6od_wrPRMp7dvg_7x0f3qcOP8CDVF2Axu7ZrnpEAefYA257BCILZ_XYJXVbdL-do-kMWm9Td4fcCNBtVvQNMMGyV3Jz0cTnrxVGg?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
-Once it works, make adjustments to the Consumption panel SQL query, making use of prepared variables.
+Once it works, make adjustments to the previously created Consumption graph, making use of dynamic variables.
 
 ## Energy Usage
 
-The last graph from the energy category is something similar to what Home Assistant shows on its Energy page. It will collect all energy data presented in previous charts into a bit different view.
+The last graph from the energy category is something similar to what Home Assistant shows on its Energy page. It will show all energy data presented in previous charts into a bit different view.
 
 ![|602x228](https://lh7-rt.googleusercontent.com/docsz/AD_4nXe4J4iKTc-xehoNHBiTUcnLN9d4du135_P6OU4jQ6GEnt7UTuMGbiTcY30PNBHbEeqdyxNRq6yntTIEaGpR9VPHlRBJas7XRw2XZUeNUn1lGXEtjHzw5BOje0vgkiwzmtEh5fZcNA?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
-The expected result is to get an overview of energy used vs superfluous
+The expected result is to get an overview of energy consumed vs superfluous.
 
-Let’s show the used energy above the X-axis. In my case, it consists of consumed solar and purchased energy.
-Superfluous energy is energy injected into the grid as well as stored in the battery.
+Let’s show the consumed energy above the X-axis. In my case, it consists of consumed solar and purchased energy.
+The energy injected into the grid as well as stored in the battery is considered the superfluous one.
 
 For this task, we need the following query:
 
@@ -817,7 +811,7 @@ Now we need to use several transformations:
 
 Like in the previous example, partition data by entityid2 and clean up the series names![|602x129](https://lh7-rt.googleusercontent.com/docsz/AD_4nXcUkJcfJXC2gcvbUh9nlMv_-cQ18h3S9aLqjIBBT2OolUYJLC6aFfmKtUcwP88gfTxbD7zGjH_fyLMyY-aIGEe3pOG7YYgI4PZBDDu1E0Ygxij2sG6dC6M2OqAPjAFXSeaeWID9YQ?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
-Perform additional math using the Add field from calculation transformation
+Perform additional math to achieve `Consumed Solar = PV - Injected - Charged`:
 
 ![|602x179](https://lh7-rt.googleusercontent.com/docsz/AD_4nXdQYEPchpvjEMi1hOHEVLs9EMSgPnz2YyUbwcRjDJgPuTwgnzRI4oovNxQm2IGy1fPPmA5cOJqAAsRqpKr_AIX1Wh3TJs_gXMMF9vEQIwRll3cSxeGE9lcl9J9OXBzNNUr2cPpJJA?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
@@ -861,9 +855,9 @@ CREATE TABLE ltss_energy.electricity_cost
 CREATE INDEX exc_electricitycost_costrange ON ltss_energy.electricity_cost USING gist (cost_type, cost_kind, cost_range);
 ```
 
-Note that exc_electricitycost_costrange, which constraint that prevents the creation of overlapping ranges for the same cost type and kind. It creates the index named the same way.
+Note that `exc_electricitycost_costrange` constraint that prevents the creation of overlapping ranges for the same cost type and kind. It creates the index named the same way.
 
-For this, it’s needed to have the `btree_gist` extension installed (see the beginning of this article).
+Such kind of constraint requires `btree_gist` extension which we already have installed (see the beginning of this article).
 
 The table is populated with data (example from my installation). Units are informative (but might be used for recalculation if one needs that). Note, pricelists usually contain prices for MWh. If you maintain energy in kWh like me, those numbers need to be divided by 1000.
 
@@ -885,7 +879,7 @@ The table is populated with data (example from my installation). Units are infor
 
 Thanks to time stored as a range type (BTW another powerful PostgreSQL feature), it’s very easy to match particular records depending on measurement time.
 
-I made a helper function that calculates the cost of the energy at certain time.
+I made a helper function that calculates the cost of the energy at certain time:
 
 ```sql
 CREATE OR REPLACE FUNCTION ltss_energy.calculate_cost
@@ -925,13 +919,16 @@ JOIN generate_series
 WHERE x.time::DATE <@ cost_range
 ORDER BY time, cost_type, cost_kind
 ```
+
+The `$__from` and `$__to` are Grafana macros. They are replaced during execution with numbers representing selected time boundaries.
+
 Having data, let’s clean up series names:
 
 ![|602x116](https://lh7-rt.googleusercontent.com/docsz/AD_4nXdG9lC3kyLSYbRrKGfTkM5o1bNL6SDwbm6biPmHRULhmvkt_keE-G1HvCh9vA4ks--N8cA3HjEs89woxhliKq5-Py11He7IvQArsyINicXYkAbjPZRql7EzS-97nB04XP5lZQyocg?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
 ## Energy Price
 
-It gets more interesting now. Let’s create a chart showing prices of purchased, injected and avoided energy. The first two are obvious. The latter is the energy that could have been purchased having an FVA installed. At the end, injected and avoided energy both contribute to the ROI.
+It gets more interesting now. Let’s create a chart showing prices of purchased, injected and avoided energy. The first two are obvious. The latter is the energy that could have been purchased with no FVA installed. At the end, injected and avoided energy both contribute to the ROI.
 
 ![|602x228](https://lh7-rt.googleusercontent.com/docsz/AD_4nXdhGigI-d2MloVMLeqpBxQ04bazPrKBNJOt16fzO7KW3ExlAmzis33Kvs1sZdy8qf7PMDWL6YT3V89aA9krWyMRGevpYPNvcqYN1mO-zDg_oMlPHVObSNE91rEZYtiDRzzoBqUqqw?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
@@ -949,25 +946,24 @@ SELECT
         WHEN entity_id ~ 'cube|mainhouse' THEN 'Consumption'
         ELSE entity_id
     END AS entityid2,
-    SUM
-    (
-        ltss_energy.calculate_cost
-        (
-            CASE WHEN entity_id ~ 'injected' THEN 'sale'
-                 WHEN entity_id ~ 'purchased' THEN 'purchase'
-                 WHEN entity_id ~ 'cube|mainhouse' THEN 'purchase'
-            END,
-            bucket, value::NUMERIC
-        )
-    ) AS value
+    SUM (
+            ltss_energy.calculate_cost
+            (
+                CASE WHEN entity_id ~ 'injected' THEN 'sale'
+                    WHEN entity_id ~ 'purchased' THEN 'purchase'
+                    WHEN entity_id ~ 'cube|mainhouse' THEN 'purchase'
+                END,
+                bucket, value::NUMERIC
+            )
+        ) AS value
 FROM ltss_energy.cagg_energy_${name_granularity}
 WHERE entity_id IN
-(
-    'sensor.energy_injected_hourly',
-    'sensor.energy_purchased_hourly',
-    'sensor.pg_mainhouse_total_energy_energy_hourly',
-    'sensor.pg_cube_total_energy_energy_hourly'
-)
+     (
+         'sensor.energy_injected_hourly',
+         'sensor.energy_purchased_hourly',
+         'sensor.pg_mainhouse_total_energy_energy_hourly',
+         'sensor.pg_cube_total_energy_energy_hourly'
+     )
 AND $__timeFilter("bucket")
 GROUP BY timeb, entityid2
 ```
@@ -1037,14 +1033,14 @@ SELECT
     timeb,
     entityid2,
     SUM(value) OVER (
-        PARTITION BY entityid2
-        ORDER BY timeb::DATE
-        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS value
+                        PARTITION BY entityid2
+                        ORDER BY timeb::DATE
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                    ) AS value
 FROM src
 ```
 
-To avoid unexpected presentation results, I zeroed collected data before FVE installation (`WHEN bucket < '2024-08-08' THEN`).
+To avoid unexpected presentation results, I zeroed collected data before FVE installation (`WHEN bucket < '2024-08-08' THEN 0`).
 
 Transformations:
 
