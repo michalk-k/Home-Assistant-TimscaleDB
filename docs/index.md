@@ -256,6 +256,29 @@ Note, there is another tool to manage a large amount of data: compression (descr
 
 # Working with TimescaleDB
 
+Let's start with an ascii art showing what we are going to achieve:
+* source `ltss` data will be compressed and oldest data will be removed from the database
+* hourly continuous aggregate (CAGG) will be build over recent data found in `ltss`
+* daily continuous aggregate will be build over hthe ourly one.
+
+The diagram depicts the time-wise dependencies between TimescaleDB objetcs we will create further, in this article
+
+```
+      drop old data       compressed data 
+ltss ─ ─ ─ ─ ─ ─ ─ ─ ─ ┴────────────────────┴─...────────┬─────┬───────┬────>
+                                                         |     |      
+                                                         |     |
+                                                hourly CAGG refresh window
+                                                         |     |
+CAGG hourly ──────┬─────────────────────┬───...──────────┴─────┴───────┼────>
+                  |                     |
+                  |                     |
+                 daily CAGG refresh window
+                  |                     |
+CAGG daily ───────┴─────────────────────┴────...───────────────────────┼────>
+                                                                      now
+```
+
 ## Hypertables
 The TimescaleDB introduces new table engine, so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
 
@@ -584,7 +607,24 @@ Otherwise, compression could interfere with the automatic refresh of newer data.
 
 ## Data retention
 
-TBD
+⚠️  **Warning: The action described in this paragraph can permanently delete your collected data. Proceed with caution.**
+
+Once your data has been aggregated into Continuous Aggregates (CAGGs), retaining the raw data in the source table (`ltss`) may no longer be necessary.
+
+However, be aware that the `ltss` table might contain other sensor data not covered by this article (e.g., temperature or hardware metrics), which may not yet be aggregated. Data retention applies to all data.
+
+TimescaleDB supports automatic data retention policies that delete old data by dropping entire chunks of the hypertable:
+
+```sql
+ SELECT add_retention_policy('ltss', INTERVAL '6 months');
+```
+
+The statement above configures TimescaleDB to retain raw data in the `ltss` table for at least one month. Once a data chunk is older than that threshold, it is automatically removed from the database.
+
+
+> :warning: Important: To avoid losing necessary data for your aggregates, ensure that the CAGGs refresh window does not overlap with any data that might be deleted. For more information, refer to the [Timescale DB docs](https://docs.timescale.com/use-timescale/latest/data-retention/data-retention-with-continuous-aggregates/).
+
+While it's technically possible to apply retention policies to CAGGs themselves, it's unlikely to be useful for the scenarios covered in this article.
 
 # Visualizing with Grafana
 
