@@ -200,7 +200,7 @@ JOIN  unnest(s.setconfig) AS cfg ON TRUE
 WHERE datname = CURRENT_CATALOG AND split_part(cfg, '=', 1) = 'TimeZone';
 ```
 
-The query outputs one or two rows. Server row indicates default server settings. TimescaleDB add-on sets it to UTC. Database row shows the setting for the current database. If exists it will override server setting. If this setting matches your desired timezone - then we are done there.
+The query outputs server row and optionally database one. Server row indicates default server settings. TimescaleDB add-on sets it to UTC. Database row shows the setting for the current database. If exists it will override server setting. If this setting matches your desired timezone - then we are done there.
 
 Otherwise we need to set it up either for database or a login role(s). I suggest to set it up for database if there are no reasoins against. It will be taken into account by background TimescaleDB processes described later on.
 
@@ -208,8 +208,7 @@ Otherwise we need to set it up either for database or a login role(s). I suggest
 ALTER DATABASE <databasename> SET TimeZone = 'desired timezone';
 ```
 
-While setting time zone, don't use abbreviations. Use full names like `Europe/Prague`. Such naming takes care about time shifts like DST, being properly working the whole year.
-The complete list of supported timezone names you may find calling this query:
+While setting time zone, don't use abbreviations (ie `CET`). Use full names like `Europe/Prague`. Such naming takes care about time shifts like DST, being properly working the whole year. The complete list of supported timezone names you may find calling this query:
 
 ```sql
 SELECT * FROM pg_timezone_names;
