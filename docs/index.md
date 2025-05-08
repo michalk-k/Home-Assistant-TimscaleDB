@@ -45,7 +45,7 @@ Bonus: Grafana can bring all this data to life with interactive dashboards right
 
 All in one, with TimescaleDB, it’s possible to achieve energy analytics unavailable in HA, like the return value of FV installation collected over the years.
 
-![|602x227](https://lh7-rt.googleusercontent.com/docsz/AD_4nXdsORdqpQ79w_ul4NxFlKigsO4ZBhQlY0YYdkG_6epbxpn5dWOh3DA-kCZ8jGDQEyNhrUIIR5cG-gF6zBPbfAMXQ-34Lb2Z91lc70aqkEOuQC98tlqbclP9Ao6ry2mtA1XGMP5xbg?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![ROI intro](images/roi_intro.png)
 
 ## Prerequisites
 
