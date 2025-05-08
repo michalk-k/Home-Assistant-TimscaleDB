@@ -735,7 +735,7 @@ In this section, I’ll walk you through the visualization setup that I’ve imp
 
 Let’s start with the simplest case: monitoring the total energy consumption of the house. My house consists of two parts, and the total consumption is simply the sum of the consumption from the two sensors.
 
-![|602x229](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfNzQB5BQUyBbZgpjM1Kkr4tJT8jHdd5X4jRzQ3vXop0yaSdcWXF5unqkwDaab5OGxfQOEo2m-YSoncQEogOeJZkcw4DpY5cvT3X_3YdmrhzFev-oNJoBqKo7H2omeOZroil2AZKQ?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Consumption Graph](images/grafana_consumption.png)
 
 The Grafana query used for this visualization looks like this:
 
@@ -779,7 +779,7 @@ Once the query is set, it's time to adjust the data in Grafana. The next step in
    * Use the Rename by regex transformation to format field names appropriately.
    * This helps in cleaning up or adjusting axis labels and field names to make them more readable and useful in the context of the graph.
 
-![|602x377](https://lh7-rt.googleusercontent.com/docsz/AD_4nXcS3sA08CpPWgS543vTa7a-FXnyZAB8mLcnjCynA8-789apelH-_aqhS5vbGADkp6EPKSaDUD6K6LshTl5Vd-QrTI2EC4vIb-2WM0Q6fUrwC3dMi7RzFneyv5scmhQKTUQt6h1jyg?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Consumption Transformations](images/grafana_consumption_transformations.png)
 
 **Configuring the Visualization**
 
@@ -802,7 +802,7 @@ Understanding Grafana’s dynamic setup may take some time, but I’ll provide a
 1. Go to Dashboard Settings → Variables
 2. Add the following variables to control granularity and data source selection:
 
-![|602x140](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfwQ_cGKG20v12kaybBqw3wCj5kmbCtmlRgceFIQtNKNeefUoOVtbS3rKjE8TCvIh7AdnPupphGFIGV9dBAVEMGu4__kVb6iYIMxBK3A5QOlKKEACh93KThlDlwHqfBChqsBdib?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Grafana Variables](images/grafana_variables.png)
 
 **Variable 1: Granularity**
 
@@ -843,9 +843,6 @@ This query dynamically adjusts the granularity depending on the time range:
 * Day if the range is greater than 3 days
 * Hour if the range is narrower than 3 days
 
-The preview should show exactly this:
-
-![|303x64](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfEL0YnakEO7KseeBOe4Bi8_vAiW9rw31FS_jw-4_AnbBphcuDbdh6SdpGFnS6FFowCDcpTrClV295R1q4RjAzkcayi8xGaCcTM8OihJOC-Cjyj8GW19cbT6PJdskWdixBHW7rHtQ?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
 **Variable 3: Name Granularity**
 
@@ -874,8 +871,7 @@ Now that we have the necessary variables (granularity, query_granularity, and na
 
 This visualization shows the amount of energy purchased and injected. In basics, it’s almost the same as the previous visualization we did.
 
-![|602x227](https://lh7-rt.googleusercontent.com/docsz/AD_4nXeSEQiC2frGlHPRGgGjHpHV8mtD9Zy_eDCQ_YoYXclr4c1A1wsgPdzkUNGILqZECrfLrYAatCZb20Tsl77t3TNRtVV3zNsoTlZE6AiLC3cYW4ra9KMTuQCntYW0uT16i5Agr_uY?key=lxjGOMoRy8aXFNM_LTsRQxoa)
-
+![Grafana Grid](images/grafana_grid.png)
 Here is a query, applying newly created variables:
 
 ```sql
@@ -898,15 +894,15 @@ Rename transformation with regular expression set to .*(injected|purchased).* re
 
 To separate injected and purchased data, I decided to show injected energy on the negative side of the graph. To achieve that, I used the Override feature of Grafana. You can find it on the very bottom of the visualization properties.
 
-![|371x273](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfuVgxubHt7mte15MV_yyAdxmpwdGKJXXvhwg6od_wrPRMp7dvg_7x0f3qcOP8CDVF2Axu7ZrnpEAefYA257BCILZ_XYJXVbdL-do-kMWm9Td4fcCNBtVvQNMMGyV3Jz0cTnrxVGg?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+<div><img src="images/grafana_overrides.png" width=30%></div>
 
-Once it works, make adjustments to the previously created Consumption graph, making use of dynamic variables.
+Once dynamic cagg selection and granularity work, adjustment the previously created Consumption graph, making use of dynamic variables.
 
 ## Energy Usage
 
 The last graph from the energy category is something similar to what Home Assistant shows on its Energy page. It will show all energy data presented in previous charts into a bit different view.
 
-![|602x228](https://lh7-rt.googleusercontent.com/docsz/AD_4nXe4J4iKTc-xehoNHBiTUcnLN9d4du135_P6OU4jQ6GEnt7UTuMGbiTcY30PNBHbEeqdyxNRq6yntTIEaGpR9VPHlRBJas7XRw2XZUeNUn1lGXEtjHzw5BOje0vgkiwzmtEh5fZcNA?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Energy usage](images/grafana_energy_usage.png)
 
 The expected result is to get an overview of energy consumed vs superfluous.
 
@@ -946,15 +942,11 @@ The query already sums energy from my two FV strings and sets final names for th
 
 Now we need to use several transformations:
 
-Like in the previous example, partition data by entityid2 and clean up the series names![|602x129](https://lh7-rt.googleusercontent.com/docsz/AD_4nXcUkJcfJXC2gcvbUh9nlMv_-cQ18h3S9aLqjIBBT2OolUYJLC6aFfmKtUcwP88gfTxbD7zGjH_fyLMyY-aIGEe3pOG7YYgI4PZBDDu1E0Ygxij2sG6dC6M2OqAPjAFXSeaeWID9YQ?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+Like in the previous example, partition data by `entityid2` and clean up the series names.
+Then perform additional math to achieve `Consumed Solar = PV - Injected - Charged`.
+Then clean up unwanted data series, and rename what needs to be renamed.
 
-Perform additional math to achieve `Consumed Solar = PV - Injected - Charged`:
-
-![|602x179](https://lh7-rt.googleusercontent.com/docsz/AD_4nXdQYEPchpvjEMi1hOHEVLs9EMSgPnz2YyUbwcRjDJgPuTwgnzRI4oovNxQm2IGy1fPPmA5cOJqAAsRqpKr_AIX1Wh3TJs_gXMMF9vEQIwRll3cSxeGE9lcl9J9OXBzNNUr2cPpJJA?key=lxjGOMoRy8aXFNM_LTsRQxoa)
-
-Then clean up unwanted data series, and rename what needs to be renamed
-
-![|602x156](https://lh7-rt.googleusercontent.com/docsz/AD_4nXc2TEvX4NHgacPD8n5QRc_B5qKtfXTeXameUNLyzi6qtAO0mwJOxRx0Mlr0E2AS1_QjaudQWT51fMVOtl93g94mOpICxuMx5Wgk3NyJkHZK3iFF_PnyTDfWTzBXcdOqrJsSQAgT?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Energy Usage Transformations](images/grafana_energy_usage_transformations.png)
 
 The final steps are selecting colors to display data series and inverting `Charged` and `Injected` to show them below the X axis.
 
@@ -983,7 +975,7 @@ CREATE TABLE ltss_energy.electricity_cost
 (
     cost_type TEXT NOT NULL,
     cost_kind TEXT NULL,
-    cost_range DATARANGE NOT NULL,
+    cost_range DATERANGE NOT NULL,
     cost_value NUMERIC NOT NULL,
     cost_unit TEXT NOT NULL,
     CONSTRAINT xc_electricitycost_costrange EXCLUDE USING gist (cost_type WITH =, cost_kind WITH =, cost_range WITH &&),
@@ -991,7 +983,7 @@ CREATE TABLE ltss_energy.electricity_cost
 );
 ```
 
-Note that the `xc_electricitycost_costrange` constraint prevents the creation of overlapping ranges for the same cost type and kind. It creates the index named the same way.
+Note that the `xc_electricitycost_costrange` constraint prevents the creation of overlapping ranges for the same cost type and kind.
 
 Such of constraint requires `btree_gist` extension, which we already have installed (see the beginning of this article).
 
@@ -1039,7 +1031,7 @@ Let’s do some graphs now.
 
 ## Price evolution
 
-![|602x227](https://lh7-rt.googleusercontent.com/docsz/AD_4nXcL0vUEvOsxwsl_lXX4gsCsJ4E29Y8llT8s1t0qoB0fSZp4R-gRr0iIBknvDsxNkis9vJpNffaVfjqlqFM36ma_4nh6DOZAVsZE-oyLqrV6W3Ui2wtCuG--hWXU4WSdMC6mx00S_w?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Price Evolution](images/grafana_prices_evolution.png)
 
 Since the table with prices contains ranges (instead of points in time), we need to generate time series out of it within a SQL query. For this task generate_series() function is the best choice. Note, using the Grafana $query_granularity variable, which command generate_series to generate datapoints in hourly or daily resolution.
 
@@ -1060,13 +1052,13 @@ The `$__from` and `$__to` are Grafana macros. They are replaced during execution
 
 Having data, let’s clean up series names:
 
-![|602x116](https://lh7-rt.googleusercontent.com/docsz/AD_4nXdG9lC3kyLSYbRrKGfTkM5o1bNL6SDwbm6biPmHRULhmvkt_keE-G1HvCh9vA4ks--N8cA3HjEs89woxhliKq5-Py11He7IvQArsyINicXYkAbjPZRql7EzS-97nB04XP5lZQyocg?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Price Evolution Transformations](images/grafana_prices_evolution_transformations.png)
 
 ## Energy Price
 
 It gets more interesting now. Let’s create a chart showing prices of purchased, injected and avoided energy. The first two are obvious. The latter is the energy that could have been purchased with no FVA installed. At the end, injected and avoided energy both contribute to the ROI.
 
-![|602x228](https://lh7-rt.googleusercontent.com/docsz/AD_4nXdhGigI-d2MloVMLeqpBxQ04bazPrKBNJOt16fzO7KW3ExlAmzis33Kvs1sZdy8qf7PMDWL6YT3V89aA9krWyMRGevpYPNvcqYN1mO-zDg_oMlPHVObSNE91rEZYtiDRzzoBqUqqw?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Costs](images/grafana_costs.png)
 
 SQL Query:
 
@@ -1108,34 +1100,26 @@ See, we use the calculate_cost() function to get prices. It’s required to get 
 
 In case of prices changing every 15 minutes, I would probably extend CAGG with pre-calculated prices
 
-As usual, partitioning and initial series name cleanup:
+As usual, we need partition and cleaup series naming, apply some basic math, and do final toches to names.
 
-![|602x131](https://lh7-rt.googleusercontent.com/docsz/AD_4nXeTUqQjnr9i3juZWUBFrzwPpmcRlLW-Oa-UmsJIkAwHMc5S1SqgQxbkBK6UqHwOXZJbPKRojTlDdb1YR59dqdFdrAsCQk57uAtV5ak6yh23ZKEflKRh-EP1U5pfTIrdK0kI43y4qQ?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Costs transformations](images/grafana_costs_transformations.png)
 
-Reduce the measured consumed energy by purchased one
-
-![|602x88](https://lh7-rt.googleusercontent.com/docsz/AD_4nXf2wblglI_nWGdWULEvIf-lSQ51BaOARccbAAEwcb3hrWoYn_HT3gZ60mGkFmVEU7E_YTt_Lksv6dpskakEo7c9rETL_aZruVy9_KBx6oF2EaKVQdMkH56iTgI0nsyIukHWwF-tjA?key=lxjGOMoRy8aXFNM_LTsRQxoa)
-
-Hide unneeded ones:
-
-![|602x103](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfSaW8L36ZjhXk8V65TdOUQiOiXckF6zK9kKlcEo3bvEjLIscwsihlIgjAAtlkJkvbu_FIg8EFN5rWb3pIfMsh8RQpgMkXBYjSWGkmghXyMKnv8yqYKyQuwL5meYC54fvoe0hTM6w?key=lxjGOMoRy8aXFNM_LTsRQxoa)
-
-And flip the purchasing data series to be on the negative side.
+The last step is to flip the purchasing data series to be on the negative side.
 
 ## Returned value
 
-![|602x229](https://lh7-rt.googleusercontent.com/docsz/AD_4nXd8Eh2qUHe3yznPWMqDbHVEqPhGsqru6SwClybUK_7hGHOxvV2TeQzQMBKUh5hQzK0ctEYYBPjWiW7nLfXRP42Gy0UtzUD7qEQdVmpG_Eme5LTYwGcW3Paf9WDt5Dx0-5qZurrqzQ?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![Return of investments](images/grafana_roi.png)
 
 The task sounds trivial: calculate a cumulative sum of the energy price (sold+avoided-bought) from existing energy records. It turns out into the most complex SQL query presented in this article. To achieve it, we need the window function. It can be written using several ways, but I prefer CTE for readability.
 
 ```sql
-WITH
+WITH 
 src AS
 (
-    SELECT
+    SELECT 
     time_bucket_gapfill
     (
-        '$query_granularity'::INTERVAL,      
+        '$query_granularity'::interval,      
         "bucket", 'Europe/Prague'
     ) AS timeb,
     CASE WHEN entity_id ~ 'injected' THEN 'Injected'
@@ -1144,44 +1128,39 @@ src AS
         ELSE entity_id
     END AS entityid2,
     SUM(CASE
-            WHEN bucket < '2024-08-08' THEN 0
-            ELSE ltss_energy.calculate_cost
+            WHEN bucket < '2024-08-08' THEN 0 
+            ELSE calculate_cost
                 (
                     CASE WHEN entity_id ~ 'injected' THEN 'sale'
                         WHEN entity_id ~ 'purchased' THEN 'purchase'
                         WHEN entity_id ~ 'cube|mainhouse' THEN 'purchase'
-                    END,
-                    bucket,
-                    value::NUMERIC
+                    END, 
+                    bucket, value::NUMERIC
                 )
         END) AS value
-    FROM ltss_energy.cagg_energy_${name_granularity}
+    FROM ltss_${name_granularity}
     WHERE entity_id  IN (
-                            'sensor.energy_injected_hourly',
+                            'sensor.energy_injected_hourly', 
                             'sensor.energy_purchased_hourly',
                             'sensor.pg_mainhouse_total_energy_energy_hourly',
                             'sensor.pg_cube_total_energy_energy_hourly'
                         )
-    AND $__timeFilter("bucket")
+    AND $__timeFilter("bucket") 
     GROUP BY timeb, entityid2
 )
 SELECT
     timeb,
     entityid2,
-    SUM(value) OVER (
-                        PARTITION BY entityid2
-                        ORDER BY timeb::DATE
-                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                    ) AS value
+    SUM(value) OVER w AS value
 FROM src
+WINDOW w AS (
+                PARTITION BY entityid2
+                ORDER BY timeb::date
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            )
 ```
 
 To avoid unexpected presentation results, I zeroed out collected data before FVE installation (`WHEN bucket < '2024-08-08' THEN 0`).
 
 Transformations:
-
-![|602x132](https://lh7-rt.googleusercontent.com/docsz/AD_4nXdVkTGtLDlczlpPbF5ns6KexImYxgwg7dESH4ynJDskF3NLTqMRJyGqg4-UJ3dqrzlK24XOcNfMO77dSrmTMCuP237d9BQgZ65ghDF1XPZ0hmr4Pu7nx5h3w0499rSeel6pv6JK?key=lxjGOMoRy8aXFNM_LTsRQxoa)
-
-![|602x181](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfcR6cVfSL0SInUZljG-fLDFOqc1rCPwVZdKkd1FS6FOSIcYdJpcJ5pvREWyxNYyu06IM2t9U47GpXxZIKS6QG_tGeI3R-NTfsicH4BMdVI3Uye_TjEBbIOuIoOcQ7Z_aT3BMPFUw?key=lxjGOMoRy8aXFNM_LTsRQxoa)
-
-![|602x123](https://lh7-rt.googleusercontent.com/docsz/AD_4nXf0c1OcbalMq339nSXfX_3xB2w7C-XO5CDQFMX3BhL7wQElJRVr6Md81x4x3wmgtveFH4o9Od4__TGieUpcEgh-EzauTvyZlhkH6GBdfFiBwy1zT-BG-N8zYF7Q38T7wzt8qp8fuA?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+![ROR transformations](images/grafana_roi_transformations.png)
