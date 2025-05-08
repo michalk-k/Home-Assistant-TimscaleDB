@@ -361,7 +361,7 @@ CAGG daily ───────┴───────────────
                                                                       now
 ```
 
-💡 Anticipating the facts: querying daily aggregation can result in real-time results!
+💡 Anticipating the facts: querying daily aggregation can result in real-time results, like querying ltss table! Keep reading!
 
 ## Hypertables
 The TimescaleDB introduces a new table engine, the so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
