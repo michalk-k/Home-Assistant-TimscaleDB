@@ -52,8 +52,11 @@ All in one, with TimescaleDB, it’s possible to achieve energy analytics unavai
 To get started, ensure the following components are installed and configured:
 
 * Home Assistant sensors. Read below for the requirements for HA sensors
-* Long-Term Statistics Store (LTSS) integration. Link: https://github.com/freol35241/ltss
-* TimescaleDB with TimescaleDB Toolkit extension enabled. It might be an add-on running in your HA Supervisor environment or as an external service. Link: https://github.com/expaso/hassos-addon-timescaledb
+* Long-Term Statistics Store (LTSS) integration.
+* TimescaleDB with TimescaleDB Toolkit extension enabled. It might be an add-on running in your HA Supervisor environment or as an external service.
+* Grafana, like TimescaleDB, you can use the HA add-on or an independent installation of Grafana.
+
+The next paragraphs go through key points of configuration.
 
 ### Home Assistant Sensors
 
