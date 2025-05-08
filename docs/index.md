@@ -27,7 +27,7 @@ While Home Assistant (HA) is a powerful automation platform, it's not ideally su
 * Performance issues: Complex queries against SQLite are virtually impossible.
 * Limited analytics: HA’s built-in visualization and analytics capabilities are basic compared to specialized tools like Grafana.
 * Inflexible data access: Data stored in HA's default database is difficult to manipulate or import from external sources. In contrast, PostgreSQL/TimescaleDB allows flexible modification and integration with third-party data, such as electricity provider exports, or recovery from backups if HA's internal storage fails.
-* Refractory on entities replacement: In HA, it's difficult to maintain entity naming when making changes to the household systems, for example, installing solar panels (FVE). Such changes lead to using different measurement devices, thus differently named sensors. Tracking energy before and after such events results in fragmented or incomplete views, without an option to visualise them as continuous data.
+* Refractory on entities replacement: In HA, it's difficult to maintain entity naming when making changes to the household systems, such as installing solar panels (FVE). Such changes lead to using different measurement devices, thus differently named sensors. Tracking energy before and after such events results in fragmented or incomplete views, without an option to visualise them as continuous data.
 
 ## Benefits of Using TimescaleDB
 
@@ -57,14 +57,14 @@ To get started, ensure the following components are installed and configured:
 
 ### Home Assistant Sensors
 
-Before we move on, with database, we need to aknowledge the character of data and make sure HA provides sensors we can use later.
+Before we move on, with the database, we need to acknowledge the character of data and make sure HA provides sensors we can use later.
 
-In general, energy data tracked by Home Assistant sensors grows in time indefinitely. Optionally it's allowed that from time to time the value is reset to zero and starts counting again. The reset can be triggered by measurement device or by HA itself (utility sensors) at any time.
+In general, energy data tracked by Home Assistant sensors grows in time indefinitely. Optionally, it's allowed that from time to time the value is reset to zero and starts counting again. The reset can be triggered by a measurement device or by HA itself (utility sensors) at any time.
 
-It's important to understand this concept, because it makes common methods like sum or delta not applicable to data evolving this way. Managing it using common SQL might be pretty complex. 
+It's important to understand this concept because it makes common methods like sum or delta not applicable to data evolving this way. Managing it using common SQL might be pretty complex. 
 TimescaleDB comes with ready-to-use tools helping with that.
 
-There is one issue more to mention and solve: data changes are reported with finite frequency (granularity). It leads to "ignoring" some energy amount when attempting to calculate this data within intervals. Let's look at the diagram:
+There is one more issue to mention and solve: data changes are reported with finite frequency (granularity). It leads to "ignoring" some energy amount when attempting to calculate this data within intervals. Let's look at the diagram:
 ```
           0     5     12           15     23
 time ─|───o─────o─────o─────|───────o─────o─────|────>
@@ -98,7 +98,7 @@ Worth mentioning that utility sensors (regardless of reset time interval) based 
 
 **Note:**
 In this article, we assume hourly data as the baseline.
-This could be considered enough for most use cases, unless you're dealing with other needs like quarter-hourly data for often used for spot market energy trading.
+This could be considered enough for most use cases, unless you're dealing with other needs like quarter-hourly data, for often used for spot market energy trading.
 
 ### Consistent Units for Energy Sensors
 
@@ -120,25 +120,25 @@ It’s the most common, easy to read, and fits well for hourly or daily energy t
 # LTSS and TimescaleDB installation
 ## Timescale DB
 
-TimescaleDB can be installed as separate service maintained by you, or using ready to use Home Assistant add-on. Installation process is described on the [add-on github pages](https://github.com/expaso/hassos-addon-timescaledb?tab=readme-ov-file#installation).
+TimescaleDB can be installed as a separate service maintained by you, or using a ready-to-use Home Assistant add-on. The installation process is described on the [add-on github pages](https://github.com/expaso/hassos-addon-timescaledb?tab=readme-ov-file#installation).
 
-To perform needed changes, you will need some db client to. The first already build-in option is a `psql` console. To get to it you have enter the timescale add-on docker.
+To perform needed changes, you will need a DB client. The first already built-in option is a `psql` console. To get to it, you have to enter the timescale add-on Docker.
 ```
 docker exec -it addon_77b2833f_timescaledb  /bin/bash
 ```
 
-If you prefer GUI client, the you can pgAdmin4 in form of another HA addon, or use other clients like DBeaver. In both cases enabling exposing postresql port in TimescaleDB Add-on settings is required.
+If you prefer a GUI client, you can use pgAdmin4 (also available as an HA add-on), or use other clients like DBeaver. In both cases, enabling exposition of the PostgreSQL port in TimescaleDB Add-on settings is required.
 
-Let's start with creation of extensions needed later on:
+Let's start with the creation of extensions needed later on:
 ```sql
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS timescaledb_toolkit;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 ```
 
-:bulb: By installting the `postgis` extention, we avoiding the need of giving LTSS component superuser privileges (which is attempting to install the extension otherwise).
+:bulb: By installing the `postgis` extension, we avoid the need to give LTSS component superuser privileges (which is attempting to install the extension otherwise).
 
-The `timescaledb_toolkit` enables additional time-series features. They are needed to to work with continuously increasing energy values, like energy.
+The `timescaledb_toolkit` enables additional time-series features. They are needed to work with continuously increasing energy values, like energy.
 
 The `btree_gist` will be needed later on for cost reports creation.
 
@@ -147,18 +147,32 @@ At the next step, let's create a dedicated schema. We will create new objects in
 CREATE SCHEMA ltss_energy;
 ```
 
-The last but not least, create dedicated user for home assistant (and optionally for you). For example:
+**Timezone does matter!** Because we will work with data grouped by days, it's crucial to let the database work in the correct (desired) timezone. Otherwise, the results will be shifted. 
+You need to know that the Timezone is set for postgresql server, then can be overridden (in this order) by database settings, client application, and logged login role. 
+
+It seems that TimescaleDB add-on, installs PostgreSQL with UTC default timezone, then creates databases with TIMEZONE inherited from the operating system. Which is Europe/Prague for me. Since this, I need not worry about aligning time intervals.
+
+
+I live in Europe/Prague time zone, and it seems that TimescaleDB add-on has configured it as expected, probably inheriting my HA OS configuration. But it's important that you check it out.
+
+
+
+
+Depending on postgresql installation type, you 
+
+Last but not least, create a dedicated user for Home Assistant. For example:
 ```sql
 CREATE ROLE ha LOGIN PASSWORD 'some_password';
 ```
+
 
 ## Configuring LTSS to Export Energy Sensors
 LTSS is the Home Assistant's custom component. It can be installed by HACS. 
 Installation instructions are available in [project Github](https://github.com/freol35241/ltss?tab=readme-ov-file#installation).
 
-LTSS writes all data into a single table: `public.ltss` (without option to change). In the article, the table will be referenced just as `ltss` since schema `public` ussually doesn't need to be explicitely referenced.
+LTSS writes all data into a single table: `public.ltss` (without option to change). In the article, the table will be referenced just as `ltss` since schema `public` usually doesn't need to be explicitly referenced.
 
-During start, the LTSS checks existence of `ltss` table. If doesn't exist, it creates it as well as adds `postgis` extension to the database. For the latter operation, it requires superuser privilges. But as you remember, we already has installed it. 
+During start, the LTSS checks the existence of `ltss` table. If it doesn't exist, it creates it as well as adds `postgis` extension to the database. For the latter operation, it requires superuser privileges. But as you remember, we have already installed it. 
 
 Once LTSS is installed, configure it to publish all needed sensors to TimescaleDB.
 
@@ -188,7 +202,7 @@ ltss:
     entity_globs:
       - sensor.*_hourly
 ```
-The configuration is similar to what the recorder offers, including globs. Unfortunately, it inherits the limitation that entities included by globs cannot be excluded anymore. In such a case, there are two options: replace globs with an explicit list of sensors, or let LTSS publish a broader set of data, to reject some entities with the use of a before trigger. While the second option seems tempting, it's easy to forget about such a trigger later on. Also it still costs additional communication and processing. But sometimes knowing this way might be life saving. 
+The configuration is similar to what the recorder offers, including globs. Unfortunately, it inherits the limitation that entities included by globs cannot be excluded anymore. In such a case, there are two options: replace globs with an explicit list of sensors, or let LTSS publish a broader set of data, to reject some entities with the use of a before trigger. While the second option seems tempting, it's easy to forget about such a trigger later on. Also it still costs additional communication and processing. But sometimes knowing this way might be life-saving. 
 
 Anyway, here is an example of such a trigger:
 
@@ -256,12 +270,12 @@ Note, there is another tool to manage a large amount of data: compression (descr
 
 # Working with TimescaleDB
 
-Let's start with an ascii art showing what we are going to achieve:
-* source `ltss` data will be compressed and oldest data will be removed from the database
-* we create the first level aggregation (hourly) build over recent data found in `ltss` table
-* we create the second level aggregation (daily) will be build over previous aggregation.
+Let's start with an ASCII art showing what we are going to achieve:
+* Source `ltss` data will be compressed, and the oldest data will be removed from the database
+* We create the first level aggregation (hourly) built over recent data found in the `ltss` table
+* We create the second-level aggregation (daily) built over the previous aggregation.
 
-The diagram below depicts the time-wise dependencies between TimescaleDB objetcs we will create in this article.
+The diagram below depicts the time-wise dependencies between TimescaleDB objects we will create in this article.
 
 ```
       drop old data       compressed data 
@@ -279,10 +293,10 @@ CAGG daily ───────┴───────────────
                                                                       now
 ```
 
-💡 Anticipating the facts: we will be able to query aggregation (lets say daily CAGG), getting real time data (like quering ltss table).
+💡 Anticipating the facts: we will be able to query aggregation (let's say daily CAGG), getting real-time data (like querying ltss table).
 
 ## Hypertables
-The TimescaleDB introduces new table engine, so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
+The TimescaleDB introduces a new table engine, so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
 
 **Hypertable Features:**
 
@@ -290,7 +304,7 @@ The TimescaleDB introduces new table engine, so-called hypertable. For a lot of 
 * Compression: Built-in support to compress historical chunks.
 * Retention policies: You can automatically drop data older than a defined threshold.
 
-The LTSS inserts data into is the hypertable. Also, Continuous Aggregates (described below) store data into hyper tables, inheriting all their features. We will be back to this subject in this article later.
+The LTSS inserts data into the hypertable. Also, Continuous Aggregates (described below) store data into hyper tables, inheriting all their features. We will be back to this subject in this article later.
 
 ## Using Continuous Aggregates
 
@@ -301,13 +315,13 @@ Continuous Aggregates (CAGGs) are materialized views that maintain aggregated da
 * Allowing old data deletion from the source table, without affecting reports
 * Being based on hypertables, CAGGs data can be compressed (or removed after some time, which is not what we need though)
 
-Earlier in the article I mentioned, that utility sensors refreshing with the same rate as source sensors. It's not impossible that single sensor generates 10MB of daily data if the changes are so frequent.
+Earlier in the article, I mentioned that utility sensors refresh at the same rate as source sensors. It's not impossible that a single sensor generates 10MB of daily data if the changes are so frequent.
 
-> :bulb: Thanks to CAGGs, we will transform that amount of data into single value per defined time period. 
+> :bulb: Thanks to CAGGs, we will transform that amount of data into a single value per defined period. 
 
 ### Defining Continuous Aggregates
 
-Before we jump into CAGGs, let’s start with a helper function. Believe me or not, changes to processed entity names, renaming them, is something that just happens, especially at the beginning of the setup. For example, I found that it’s better to have a generic name for injected/purchased energy rather than use names dependent on a measuring device. I renamed them in HA, but then needed to reflect the change in a CAGG. Other situation was the need to cover pre-FV a FV eras together.
+Before we jump into CAGGs, let’s start with a helper function. Believe me or not, changes to processed entity names, renaming them, is something that just happens, especially at the beginning of the setup. For example, I found that it’s better to have a generic name for injected/purchased energy rather than use names dependent on a measuring device. I renamed them in HA, but then needed to reflect the change in a CAGG. Another situation was the need to cover pre-FV a FV eras together.
 
 Anyway, I found out that it’s easier to add a new sensor name or manipulate its name when the list of sensors is provided by the utility function, rather than hardcoded within a CAGG. There is no option to update the statement of the materialized view. At the same time, the function can be replaced at any time. Notice the IMMUTABLE keyword in this function definition.
 
@@ -332,7 +346,7 @@ AS $$
 $$;
 ```
 
-Now CAGG definition, making use of the function above. The CAGG makes use of a `counter_agg()` function. It comes from timescaledb toolkit. And it's dedicated to handle data of which values grow indefinitely, being reset sometimes. Also notice casting `state` value into numeric data type (HA provides it as a text). To not make this cast fail, textual values like `'unavailable', 'unknown'` must be excluded.
+Now CAGG definition, making use of the function above. The CAGG makes use of a `counter_agg()` function. It comes from the timescaledb toolkit. And it's designed to handle data whose values grow indefinitely, being reset sometimes. Also, notice casting `state` value into a numeric data type (HA provides it as a text). To not make this cast fail, textual values like `'unavailable', 'unknown'` must be excluded.
 
 ```sql
 CREATE MATERIALIZED VIEW ltss_energy.cagg_energy_hourly
@@ -348,7 +362,7 @@ GROUP BY bucket, entity_id
 WITH NO DATA;
 ```
 
-It might be useful to look at existing CAGG in order to check out its definition:
+It might be useful to look at the existing CAGG in order to check out its definition:
 
 ```sql
 SELECT * FROM timescaledb_information.continuous_aggregates;
@@ -369,7 +383,7 @@ There are several limitations when writing CAGGs. Most important to remember are
 * need of using `time_bucket()`
 * Inability to use `time_bucket_fillgapp()` instead of time_bucket().
 
-All those limitations makes impossible to interpolate or extrapolate missing data during CAGG calculations (are you recalling the issue described in HA sensors paragraph?).
+All those limitations make it impossible to interpolate or extrapolate missing data during CAGG calculations (are you recalling the issue described in the HA sensors paragraph?).
 
 These limitations can be worked around, most effectively by handling such calculations later on, during data retrieval for front-end visualization or reporting. This allows for flexibility while keeping the continuous aggregate definitions simple and efficient.
 
@@ -399,7 +413,7 @@ Manual refresh was already mentioned in the previous paragraph to populate CAGG 
 ```sql
 CALL refresh_continuous_aggregate('<cagg_name>', <window_start>, <window_end>, TRUE);
 ```
-But for us, the most useful is to set CAGGs update policy, which ensures automatic updates:
+But for us, the most useful is to set the CAGGs update policy, which ensures automatic updates:
 
 ```sql
 SELECT add_continuous_aggregate_policy(
@@ -454,13 +468,13 @@ This way, you get the best of both worlds — high performance for historical da
 ### Hierarchical CAGGs
 
 When working with large time ranges (like daily, monthly, or yearly views), it’s important to improve performance by aggregating at different levels.
-One of the main reasons for using CAGGs is to eventually delete the original raw data — once it's safely summarized.
+One of the main reasons for using CAGGs is to eventually delete the original raw data, once it's safely summarized.
 
 However, if you calculate monthly, quarterly, or annual aggregates directly from the original raw data, it wastes a lot of computing resources.
 And if you’ve already deleted raw data (as planned), you wouldn't even be able to do it!
 
 TimescaleDB offers a solution: Hierarchical Continuous Aggregates.
-This means you can create a CAGG based on another, more detailed CAGG — without touching the raw data.
+This means you can create a CAGG based on another, more detailed CAGG, without touching the raw data.
 
 Here's a conceptual diagram (borrowed from the TimescaleDB blog):
 
@@ -501,19 +515,19 @@ SET (timescaledb.materialized_only = false);
 
 ## Data Compression
 
-As mentioned earlier, TimescaleDB hypertables offer built-in support for data compression — and I can say from experience:
+As mentioned earlier, TimescaleDB hypertables offer built-in support for data compression, and I can say from experience:
 
 It’s a game changer.
 
 You can expect huge storage savings.
 For example, in my setup:
 
-* One month of raw energy data in the ltss table took around 7 GB.
+* One month of raw energy data in the `ltss` table took around 7 GB.
 * After compression, the same data took just 126 MB!
 
 That's a compression ratio of more than 50× — seriously impressive.
 
-### How to setup compression
+### How to set up compression
 
 To maintain good query performance on compressed data, the compressed format must match your query patterns. Specifically, you need to carefully choose:
 
@@ -594,7 +608,7 @@ However, if you expect much larger datasets (or just want maximum storage optimi
 
 Important note:
 While it’s technically possible to compress the underlying hypertable directly, this is not recommended.
-The reason is that continuous aggregate policies and compression policies must cooperate — otherwise you risk breaking updates or refreshes.
+The reason is that continuous aggregate policies and compression policies must cooperate — otherwise, you risk breaking updates or refreshes.
 
 Instead, TimescaleDB provides a safe, dedicated method for CAGG compression:
 ```sql
@@ -717,7 +731,7 @@ Understanding Grafana’s dynamic setup may take some time, but I’ll provide a
 * Show on Dashboard: Label and Value
 * Custom Options: `Auto, hour: 1 hour, day: 1 day, month: 1 month, year: 1 year`
 
-This variable will allows the user to manually select the granularity he/she wants to see on the graph. The `Auto` will cause selecting the granularity automatically based on selected time range.
+This variable will allow the user to manually select the granularity he/she want to see on the graph. The `Auto` will cause the selection of the granularity automatically based on the selected time range.
 
 **Variable 2: Query Granularity**
 
@@ -754,7 +768,7 @@ The preview should show exactly this:
 
 **Variable 3: Name Granularity**
 
-The purpose of this variable is to ensure the most suitable CAGG is used for requested granularity. Since our CAGGs follow a naming convention (e.g., cagg_energy_hourly, cagg_energy_daily), we can just replace the suffix of the CAGG name to achieve that.
+The purpose of this variable is to ensure the most suitable CAGG is used for the requested granularity. Since our CAGGs follow a naming convention (e.g., cagg_energy_hourly, cagg_energy_daily), we can just replace the suffix of the CAGG name to achieve that.
 
 * Type: Query
 * Name: name_granularity
@@ -816,7 +830,7 @@ The last graph from the energy category is something similar to what Home Assist
 The expected result is to get an overview of energy consumed vs superfluous.
 
 Let’s show the consumed energy above the X-axis. In my case, it consists of consumed solar and purchased energy.
-The energy injected into the grid as well as stored in the battery is considered the superfluous one.
+The energy injected into the grid as well as stored in the battery is considered superfluous.
 
 For this task, we need the following query:
 
@@ -847,7 +861,7 @@ AND $__timeFilter("bucket")
 GROUP BY timeb, entityid2
 ```
 
-The query already sums energy from my two FV strings, and sets final names for time series.
+The query already sums energy from my two FV strings and sets final names for the time series.
 
 Now we need to use several transformations:
 
@@ -869,17 +883,17 @@ Costs are probably the ultimate goal of everything we have done so far. Everyone
 
 Having experience with building the visualisation from data stored in TimescaleDB, displaying costs is just another variation. The difference is, we need the price of the energy unit. Moreover, it must track multiple prices (for purchasing and selling energy) in time.
 
-At this point, the approach might vary depending on the contract with the energy provider. For example, prices might change every several months or every 15 minutes, being delivered by HA sensor.
+At this point, the approach might vary depending on the contract with the energy provider. For example, prices might change every several months or every 15 minutes, being delivered by an HA sensor.
 
-I don’t operate on spot, having a semi-fixed price, being not updated frequently (and getting previous and new price with a billing). So I come with an approach suitable for me, while it can be easily adjusted to be synced with HA sensor.
+I don’t operate on the spot, having a semi-fixed price, being not updated frequently (and getting the previous and new price with a billing). So I come with an approach suitable for me, while it can be easily adjusted to be synced with the HA sensor.
 
-I’ve introduced a table in Postgresql database, maintaining prices manually.
+I’ve introduced a table in the PostgreSQL database, maintaining prices manually.
 
 This approach has multiple benefits at the start.
 
 * I can change prices retrospectively
-* I can setup them up for the future
-* It can maintain multiple types of charge (energy, distribution etc)
+* I can set them up for the future
+* It can maintain multiple types of charge (energy, distribution, etc)
 * Once I have a HA sensor with a variable price, I can easily fill this table with incoming values using the trigger.
 
 Here is a structure of the table:
@@ -891,17 +905,16 @@ CREATE TABLE ltss_energy.electricity_cost
     cost_range DATARANGE NOT NULL,
     cost_value NUMERIC NOT NULL,
     cost_unit TEXT NOT NULL,
-    CONSTRAINT exc_electricitycost_costrange EXCLUDE USING gist (cost_type WITH =, cost_kind WITH =, cost_range WITH &&),
-    CONSTRAINT pk_electricitycost PRIMARY KEY (cost_type, cost_range)
+    CONSTRAINT xc_electricitycost_costrange EXCLUDE USING gist (cost_type WITH =, cost_kind WITH =, cost_range WITH &&),
+    CONSTRAINT pk_electricitycost PRIMARY KEY (cost_type, cost_kind, cost_range)
 );
-CREATE INDEX exc_electricitycost_costrange ON ltss_energy.electricity_cost USING gist (cost_type, cost_kind, cost_range);
 ```
 
-Note that `exc_electricitycost_costrange` constraint that prevents the creation of overlapping ranges for the same cost type and kind. It creates the index named the same way.
+Note that the `xc_electricitycost_costrange` constraint prevents the creation of overlapping ranges for the same cost type and kind. It creates the index named the same way.
 
-Such kind of constraint requires `btree_gist` extension which we already have installed (see the beginning of this article).
+Such of constraint requires `btree_gist` extension, which we already have installed (see the beginning of this article).
 
-The table is populated with data (example from my installation). Units are informative (but might be used for recalculation if one needs that). Note, pricelists usually contain prices for MWh. If you maintain energy in kWh like me, those numbers need to be divided by 1000.
+The table is populated with data (example from my installation). Units are informative (but might be used for recalculation if one needs that). Note, pricelists usually contain prices for `MWh`. If you maintain energy in `kWh` like me, those numbers need to be divided by 1000.
 
 
 |cost_type|cost_kind   |cost_range             |cost_value|cost_unit|
@@ -921,7 +934,7 @@ The table is populated with data (example from my installation). Units are infor
 
 Thanks to time stored as a range type (BTW another powerful PostgreSQL feature), it’s very easy to match particular records depending on measurement time.
 
-I made a helper function that calculates the cost of the energy at certain time:
+I made a helper function that calculates the cost of the energy at a certain time:
 
 ```sql
 CREATE OR REPLACE FUNCTION ltss_energy.calculate_cost
@@ -947,7 +960,7 @@ Let’s do some graphs now.
 
 ![|602x227](https://lh7-rt.googleusercontent.com/docsz/AD_4nXcL0vUEvOsxwsl_lXX4gsCsJ4E29Y8llT8s1t0qoB0fSZp4R-gRr0iIBknvDsxNkis9vJpNffaVfjqlqFM36ma_4nh6DOZAVsZE-oyLqrV6W3Ui2wtCuG--hWXU4WSdMC6mx00S_w?key=lxjGOMoRy8aXFNM_LTsRQxoa)
 
-Since the table with prices contains ranges, not points in time, these must be generated within SQL query. For this task generate_series() function is the best choice. note, using the Grafana $query_granularity variable, which command generate_series to generate datapoints in hourly or daily resolution.
+Since the table with prices contains ranges (instead of points in time), we need to generate time series out of it within a SQL query. For this task generate_series() function is the best choice. Note, using the Grafana $query_granularity variable, which command generate_series to generate datapoints in hourly or daily resolution.
 
 ```sql
 SELECT time, cost_type, cost_kind, cost_value
@@ -1082,7 +1095,7 @@ SELECT
 FROM src
 ```
 
-To avoid unexpected presentation results, I zeroed collected data before FVE installation (`WHEN bucket < '2024-08-08' THEN 0`).
+To avoid unexpected presentation results, I zeroed out collected data before FVE installation (`WHEN bucket < '2024-08-08' THEN 0`).
 
 Transformations:
 
