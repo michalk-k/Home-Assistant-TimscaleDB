@@ -258,10 +258,10 @@ Note, there is another tool to manage a large amount of data: compression (descr
 
 Let's start with an ascii art showing what we are going to achieve:
 * source `ltss` data will be compressed and oldest data will be removed from the database
-* hourly continuous aggregate (CAGG) will be build over recent data found in `ltss`
-* daily continuous aggregate will be build over hthe ourly one.
+* we create the first level aggregation (hourly) build over recent data found in `ltss` table
+* we create the second level aggregation (daily) will be build over previous aggregation.
 
-The diagram depicts the time-wise dependencies between TimescaleDB objetcs we will create further, in this article
+The diagram below depicts the time-wise dependencies between TimescaleDB objetcs we will create in this article.
 
 ```
       drop old data       compressed data 
@@ -275,9 +275,11 @@ CAGG hourly ──────┬───────────────�
                   |                     |
                  daily CAGG refresh window
                   |                     |
-CAGG daily ───────┴─────────────────────┴────...───────────────────────┼────>
+CAGG daily ───────┴─────────────────────┴────...───────────────────────┼────> time
                                                                       now
 ```
+
+💡 Anticipating the facts: we will be able to query aggregation (lets say daily CAGG), getting real time data (like quering ltss table).
 
 ## Hypertables
 The TimescaleDB introduces new table engine, so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
