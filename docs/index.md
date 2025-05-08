@@ -117,10 +117,10 @@ Later in this article, you'll see that units are stored together with the data. 
 Stick to `kWh` as your standard unit.
 It’s the most common, easy to read, and fits well for hourly or daily energy tracking.
 
-# LTSS and TimescaleDB installation
+# Installation
 ## Timescale DB
 
-TimescaleDB can be installed as a separate service maintained by you, or using a ready-to-use Home Assistant add-on. The installation process is described on the [add-on github pages](https://github.com/expaso/hassos-addon-timescaledb?tab=readme-ov-file#installation).
+TimescaleDB can be installed as a separate service, or using a ready-to-use Home Assistant add-on. The installation process is described on the [add-on github pages](https://github.com/expaso/hassos-addon-timescaledb?tab=readme-ov-file#installation).
 
 To execute actions described in this part of article, you will need a DB client. The first already built-in option is a `psql` console. You can access it directly from HA console:
 ```
@@ -129,13 +129,13 @@ docker exec -it addon_77b2833f_timescaledb  psql -U <username> <databasename>
 
 If you prefer a GUI client, you can use pgAdmin4 (also available as an HA add-on), or use other clients like DBeaver (my favorite). In both cases, enabling exposition of the PostgreSQL port in TimescaleDB Add-on settings is required.
 
-After TimescaleDB installation only `postgres` login role is available. If you create your own, make it `SUPERUSER` - it might be needed. Then be careful, it gives superpower ;)
+After TimescaleDB installation, only `postgres` login role is available. If you create your own, make it `SUPERUSER` - it might be needed. Then be careful, it gives a superpower ;)
 
 
 ### Privileges
-I assume that TimescaleDB has been installed by the add-on installer, creating requested databases. It means, that owner of the created database(s) is `postgres` role and those databases are set to be accessible for any logged in role.
+I assume that TimescaleDB has been installed by the add-on installer, creating requested databases. It means, that owner of the created database(s) is `postgres` role and those databases are accessible to any role who connected.
 
-:warning: login role `postgres` is the most privileged one in the system. It's a bad practice to provide such a privileges to component (if not needed).
+:warning: login role `postgres` is the most privileged one in the system. It's a bad practice to provide such a privileges to any component.
 
 Lets create dedicated roles then. Right now I consider only roles for LTSS and Grafana.
 ```sql
@@ -144,7 +144,7 @@ CREATE ROLE app_grafana LOGIN PASSWORD 'another_password';
 ALTER ROLE app_grafana SET transaction_read_only = 'on';
 ```
 
-Setting grafana's login role to read-only potentially brings some performance, let's agree  neglible one in our setup. Take it as the best practice.
+Setting grafana's login role to read-only potentially brings some performance benefits, let's agree neglible ones in our setup. Take it as the best practice.
 
 The LTSS will need an access to public schema, to create its table:
 ```sql
@@ -165,55 +165,54 @@ The `timescaledb_toolkit` enables additional time-series features. They are need
 
 The `btree_gist` will be needed later on for cost reports creation.
 
-At the next step, let's create a dedicated schema. We will create new objects in this schema to maintain clarity (public schema is already crowded with TimescaleDb objects)
+At the next step, let's create a dedicated schema. All new obejcts we will create will be located in this schema to maintain clarity (public schema is already crowded with TimescaleDb objects)
 ```sql
 CREATE SCHEMA ltss_energy;
 GRANT USAGE ON SCHEMA ltss_energy to public;
 ```
 
-By default schemas are not accessible to any connected user (except superusers). The access might be given to particular role(s), or to all connected roles (as long as they passed privileges check on parent objects). The latter is achieved by giving privilege to `public` role.
+By default connecting database doesn't give access to schemas (unless a user is a superuser). The access might be given to particular role(s), or to all connected roles (as long as they passed privileges check on parent objects). The latter is achieved by giving privilege to `public` role.
 
 The same rule applies to objects created within this schema (excluding fuctions).
 
 ### Timezone does matter!
-Because we will work with data grouped by days, it's crucial to let the database know desired timezone. Otherwise, the results might be shifted. It can be resolved by properly set databse, or passed to queries which require that information.
+Because we will work with data grouped by days, it's crucial to let the database know desired timezone. Otherwise, the results might be shifted (midnight in different time zones is observed at different times). It can be resolved by properly set databse, or passed to queries which require that information.
 
-It's important to know that currently active timezone depends on several settings, one overriding another, in this order: `server defaults -> database -> client connection -> login role`
+It's important to know that currently active timezone depends on several settings, one overriding another, in this order: `server defaults -> database -> client connection -> login role`.
 
-Some applications sets timezone on start of client connection (likely based on system settings, for example DBeaver). Others like `psql` or `Grafana` doesn't do this. In this case only server and database settings are evaluated. This information is important, especially if you observe different result of queries called using different applications.
+Some applications set timezone on start of client connection (based on operating system or the app settings, for example DBeaver). Others like `psql` or `Grafana` don't do this relaying on default provided by the database. In this case only server and database settings are evaluated. This information is important, especially if you observe different result of queries when calling them from different applications.
 
 You can always check the current/active timezone and what is the source of this setting by calling:
 
 ```sql
-SELECT setting, source FROM pg_settings WHERE name = 'TimeZone'
+SELECT setting, source FROM pg_settings WHERE name = 'TimeZone';
 ```
 
 Let's connect our database and check out the setting of server and database:
 
 ```sql
-SELECT 'server' as source, boot_val AS timezone FROM pg_Settings WHERE name = 'TimeZone'
+SELECT 'server' AS source, boot_val AS timezone FROM pg_Settings WHERE name = 'TimeZone'
 UNION
-SELECT
-  'database' , split_part(cfg, '=', 2) AS timezone
+SELECT 'database' AS source, split_part(cfg, '=', 2) AS timezone
 FROM pg_db_role_setting s
 JOIN pg_database d ON s.setdatabase = d.oid
 JOIN  unnest(s.setconfig) AS cfg ON TRUE
-WHERE datname = CURRENT_CATALOG AND split_part(cfg, '=', 1) = 'TimeZone'
+WHERE datname = CURRENT_CATALOG AND split_part(cfg, '=', 1) = 'TimeZone';
 ```
 
-It will output one or two rows. Server row indicates default server settings. TimescaleDB add-on sets it to UTC. Database row shows the setting for the database. If exists it will override server setting. If this setting matches your desired timezone - then we are done there.
+The query outputs one or two rows. Server row indicates default server settings. TimescaleDB add-on sets it to UTC. Database row shows the setting for the current database. If exists it will override server setting. If this setting matches your desired timezone - then we are done there.
 
-Otherwise we need to set it up either for database or a login role(s). I suggest to set it up for database if there are no arguments against. it will be taken into account by background TimescaleDB processes described later on.
+Otherwise we need to set it up either for database or a login role(s). I suggest to set it up for database if there are no reasoins against. It will be taken into account by background TimescaleDB processes described later on.
 
 ```sql
-ALTER DATABASE <databasename> SET TimeZone = 'your time zone';
+ALTER DATABASE <databasename> SET TimeZone = 'desired timezone';
 ```
 
 While setting time zone, don't use abbreviations. Use full names like `Europe/Prague`. Such naming takes care about time shifts like DST, being properly working the whole year.
 The complete list of supported timezone names you may find calling this query:
 
 ```sql
-SELECT * FROM pg_timezone_names
+SELECT * FROM pg_timezone_names;
 ```
 
 ## Configuring LTSS to Export Energy Sensors
@@ -318,6 +317,15 @@ EXECUTE FUNCTION public.ltss_strip_attributes();
 This trigger is especially useful when storing large amounts of sensor data where the attributes field may otherwise bloat the database.
 Note, there is another tool to manage a large amount of data: compression (described later).
 
+## Grafana
+
+Like TimescaleDB, you have option to use Home Assistant add-on or external Grafana. 
+Installation itself requires no notes.
+
+Grafana natively supports postgresql. The only thing is to configure a datasource within Grafana. Provide `77b2833f-timescaledb:5432` as Host Url, then database name, user name and password as created earlier. Enable TimescaleDB switch - it will enable TimescaleDB specific features in SQL builder. Configuration of diagrams described in this article will not be using it though.
+
+:bulb: Note, data source offers no option to set TimeZone.
+
 # Working with TimescaleDB
 
 Let's start with an ASCII art showing what we are going to achieve:
@@ -343,7 +351,7 @@ CAGG daily ───────┴───────────────
                                                                       now
 ```
 
-💡 Anticipating the facts: querying daily aggregation doesn't make impossible to get real time results
+💡 Anticipating the facts: querying daily aggregation doesn't make impossible to get real time results!
 
 ## Hypertables
 The TimescaleDB introduces a new table engine, so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
