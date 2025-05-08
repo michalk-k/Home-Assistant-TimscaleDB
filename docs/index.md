@@ -57,7 +57,7 @@ To get started, ensure the following components are installed and configured:
 
 ### Home Assistant Sensors
 
-Before we move on, with the database, we need to acknowledge the character of data and make sure HA provides sensors we can use later.
+Before we move on with the database, we need to acknowledge the character of data and make sure HA provides sensors we can use later.
 
 In general, energy data tracked by Home Assistant sensors grows in time indefinitely. Optionally, it's allowed that from time to time the value is reset to zero and starts counting again. The reset can be triggered by a measurement device or by HA itself (utility sensors) at any time.
 
@@ -76,7 +76,7 @@ Suppose we want to calculate total energy usage for the day (midnight to midnigh
 * the energy used between midnight and y
 * the daily energy
 
-Simple grouping by day would result in 12 units during the first day and 8 units in the second one. 3 units are lost. Sometimes your energy readings will be frequent enough that the error is small, but you can’t always count on that.
+Simple grouping by day would result in 12 units during the first day and 8 units on the second day. 3 units are lost. Sometimes your energy readings will be frequent enough that the error is small, but you can’t always count on that.
 
 We could try to interpolate (estimate) these missing parts, but for our case (explained later), interpolation isn't the way to go.
 
@@ -120,76 +120,78 @@ It’s the most common, easy to read, and fits well for hourly or daily energy t
 # Installation
 ## Timescale DB
 
-TimescaleDB can be installed as a separate service, or using a ready-to-use Home Assistant add-on. The installation process is described on the [add-on github pages](https://github.com/expaso/hassos-addon-timescaledb?tab=readme-ov-file#installation).
+TimescaleDB can be installed as a separate service or using a ready-to-use Home Assistant add-on. The installation process is described on the [add-on github pages](https://github.com/expaso/hassos-addon-timescaledb?tab=readme-ov-file#installation).
 
-To execute actions described in this part of article, you will need a DB client. The first already built-in option is a `psql` console. You can access it directly from HA console:
+To execute actions described in this part of the article, you will need a DB client. The first already built-in option is a `psql` console. You can access it directly from HA console:
 ```
 docker exec -it addon_77b2833f_timescaledb  psql -U <username> <databasename>
 ```
 
 If you prefer a GUI client, you can use pgAdmin4 (also available as an HA add-on), or use other clients like DBeaver (my favorite). In both cases, enabling exposition of the PostgreSQL port in TimescaleDB Add-on settings is required.
 
-After TimescaleDB installation, only `postgres` login role is available. If you create your own, make it `SUPERUSER` - it might be needed. Then be careful, it gives a superpower ;)
+After TimescaleDB installation, only the `postgres` login role is available. If you create your own, make it `SUPERUSER` - it might be needed. Then be careful, it gives a superpower ;)
 
 
 ### Privileges
-I assume that TimescaleDB has been installed by the add-on installer, creating requested databases. It means, that owner of the created database(s) is `postgres` role and those databases are accessible to any role who connected.
+Assuming TimescaleDB was installed via the add-on installer and the necessary databases were created, those databases are accessible to any role that can authenticate.
 
-:warning: login role `postgres` is the most privileged one in the system. It's a bad practice to provide such a privileges to any component.
+To operate LTSS and Grafana, we need to define dedicated login roles with minimal required privileges. Using the default postgres role is discouraged due to its broad and unrestricted permissions.
 
-Lets create dedicated roles then. Right now I consider only roles for LTSS and Grafana.
+Let’s create roles specifically for LTSS and Grafana:
 ```sql
 CREATE ROLE app_ltss LOGIN PASSWORD 'some_password';
 CREATE ROLE app_grafana LOGIN PASSWORD 'another_password';
-ALTER ROLE app_grafana SET transaction_read_only = 'on';
 ```
 
-Setting grafana's login role to read-only potentially brings some performance benefits, let's agree neglible ones in our setup. Take it as the best practice.
-
-The LTSS will need an access to public schema, to create its table:
+LTSS needs permission to create tables in the public schema:
 ```sql
 GRANT CREATE ON SCHEMA public to app_ltss;
 ```
 
-### Extensions and objects
-Move to next step: create extensions needed later on:
+### Extensions
+Next, install the required extensions that will be used later:
 ```sql
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS timescaledb_toolkit;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 ```
 
-:bulb: By installing the `postgis` extension, we avoid the need to give LTSS component superuser privileges (which is attempting to install the extension otherwise).
+:bulb: Why install these manually?
 
-The `timescaledb_toolkit` enables additional time-series features. They are needed to work with continuously increasing values, like energy.
+* `postgis` – Installing it up front prevents the LTSS component from requesting superuser privileges to install it later.
+* `timescaledb_toolkit` – Enables additional time-series features needed for handling continuously increasing values like energy consumption.
+* `btree_gist` – Required later for advanced indexing when generating cost reports.
 
-The `btree_gist` will be needed later on for cost reports creation.
-
-At the next step, let's create a dedicated schema. All new obejcts we will create will be located in this schema to maintain clarity (public schema is already crowded with TimescaleDb objects)
+### Schema organization
+Now let’s create a dedicated schema. This keeps our objects organized and avoids polluting the already-crowded public schema used by TimescaleDB:
 ```sql
 CREATE SCHEMA ltss_energy;
 GRANT USAGE ON SCHEMA ltss_energy to public;
 ```
+By default, database users don't automatically have access to schemas unless explicitly granted. You can assign schema access either to specific roles or, if you want to allow access to all authenticated users, to the public pseudo-role, as shown above.
 
-By default connecting database doesn't give access to schemas (unless a user is a superuser). The access might be given to particular role(s), or to all connected roles (as long as they passed privileges check on parent objects). The latter is achieved by giving privilege to `public` role.
-
-The same rule applies to objects created within this schema (excluding fuctions).
+This same rule applies to objects created within the schema (except for functions).
 
 ### Timezone does matter!
-Because we will work with data grouped by days, it's crucial to let the database know desired timezone. Otherwise, the results might be shifted (midnight in different time zones is observed at different times). It can be resolved by properly set databse, or passed to queries which require that information.
+Because we’re working with data grouped by days, it’s critical to ensure that the database uses the correct timezone. Otherwise, query results can be misaligned—for example, a "midnight" timestamp might fall on the wrong day depending on the timezone.
 
-It's important to know that currently active timezone depends on several settings, one overriding another, in this order: `server defaults -> database -> client connection -> login role`.
+You can resolve this either by configuring the database appropriately or by explicitly passing the timezone in queries that rely on date grouping.
 
-Some applications set timezone on start of client connection (based on operating system or the app settings, for example DBeaver). Others like `psql` or `Grafana` don't do this relaying on default provided by the database. In this case only server and database settings are evaluated. This information is important, especially if you observe different result of queries when calling them from different applications.
+#### How PostgreSQL Handles Timezones
+The active timezone used in a session is determined by several layers of configuration. The settings are applied in the following order:
+```server defaults -> database -> client connection -> login role```
 
-You can always check the current/active timezone and what is the source of this setting by calling:
+Some tools (e.g., DBeaver) automatically set the timezone at the start of the client connection, usually based on the system or application settings. Others, like psql or Grafana, do not override the session timezone, relying instead on whatever is configured at the database level.
+
+This is important to understand, especially if you observe different query results depending on which tool you're using.
+
+#### Check the Active Timezone
+To check the current session timezone and its source, use:
 
 ```sql
 SELECT setting, source FROM pg_settings WHERE name = 'TimeZone';
 ```
-
-Let's connect our database and check out the setting of server and database:
-
+To examine both server and database-level timezone settings, run:
 ```sql
 SELECT 'server' AS source, boot_val AS timezone FROM pg_Settings WHERE name = 'TimeZone'
 UNION
@@ -200,16 +202,22 @@ JOIN  unnest(s.setconfig) AS cfg ON TRUE
 WHERE datname = CURRENT_CATALOG AND split_part(cfg, '=', 1) = 'TimeZone';
 ```
 
-The query outputs server row and optionally database one. Server row indicates default server settings. TimescaleDB add-on sets it to UTC. Database row shows the setting for the current database. If exists it will override server setting. If this setting matches your desired timezone - then we are done there.
+* The server row shows the default timezone at the instance level (usually UTC when using TimescaleDB add-on).
+* If a database row appears, its value overrides the server default for that specific database.
 
-Otherwise we need to set it up either for database or a login role(s). I suggest to set it up for database if there are no reasoins against. It will be taken into account by background TimescaleDB processes described later on.
+#### Set the Preferred Timezone
+
+If the database timezone does not match your desired setting, it’s best to set it at the database level. This ensures consistency and also affects TimescaleDB background processes (like CAGG refresh policies).
+
+To set the database timezone:
 
 ```sql
 ALTER DATABASE <databasename> SET TimeZone = 'desired timezone';
 ```
 
-While setting time zone, don't use abbreviations (ie `CET`). Use full names like `Europe/Prague`. Such naming takes care about time shifts like DST, being properly working the whole year. The complete list of supported timezone names you may find calling this query:
+Avoid abbreviations like `CET` or `PST`. Instead, use full names (e.g., `Europe/Prague`, `America/New_York`). These handle daylight saving time automatically and are much more reliable year-round.
 
+You can find a list of all supported timezone names with:
 ```sql
 SELECT * FROM pg_timezone_names;
 ```
@@ -228,7 +236,7 @@ Once LTSS is installed, configure it to publish all needed sensors to TimescaleD
 
 Configuration of LTSS typically involves selecting the appropriate sensors in the integration’s configuration in configuration.yaml.
 
-Example below makes LTSS component connected to `ha_ltss` database available in TimescaleDB installed as HA add-on with user `app_ltss`. It will publish specified glances sensors (unimportant from pov of this article, just example) and all sensors which name ends with `_hourly` phrase.
+The example below makes LTSS component connected to `ha_ltss` database available in TimescaleDB installed as HA add-on with user `app_ltss`. It will publish specified Glances sensors (unimportant from pov of this article, just an example) and all sensors whose name ends with `_hourly` phrase.
 
 ```yaml
 ltss:
@@ -250,7 +258,7 @@ ltss:
     entity_globs:
       - sensor.*_hourly
 ```
-The configuration is similar to what the recorder offers, including globs. Unfortunately, it inherits the limitation that entities included by globs cannot be excluded anymore. In such a case, there are two options: replace globs with an explicit list of sensors, or let LTSS publish a broader set of data, to reject some entities with the use of a before trigger. While the second option seems tempting, it's easy to forget about such a trigger later on. Also it still costs additional communication and processing. But sometimes knowing this way might be life-saving. 
+The configuration is similar to what the recorder offers, including globs. Unfortunately, it inherits the limitation that entities included by globs cannot be excluded anymore. In such a case, there are two options: replace globs with an explicit list of sensors, or let LTSS publish a broader set of data, to reject some entities with the use of a before trigger. While the second option seems tempting, it's easy to forget about such a trigger later on. Also, it still costs additional communication and processing. But sometimes knowing this way might be life-saving. 
 
 Anyway, here is an example of such a trigger:
 
@@ -350,10 +358,10 @@ CAGG daily ───────┴───────────────
                                                                       now
 ```
 
-💡 Anticipating the facts: querying daily aggregation doesn't make impossible to get real time results!
+💡 Anticipating the facts: querying daily aggregation can result in real-time results!
 
 ## Hypertables
-The TimescaleDB introduces a new table engine, so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
+The TimescaleDB introduces a new table engine, the so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
 
 **Hypertable Features:**
 
@@ -421,8 +429,9 @@ WITH NO DATA;
 GRANT SELECT ON VIEW ltss_energy.cagg_energy_hourly TO public;
 ```
 
-`GRANT` gives read only access to all connected users. 
-
+`GRANT` gives read-only access to all connected users.
+TimescaleDB background processes don't need special privileges.
+You, as a view creator (owner), are not limited by any privileges.
 
 It might be useful to look at the existing CAGG in order to check out its definition:
 
