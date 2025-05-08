@@ -122,14 +122,37 @@ It’s the most common, easy to read, and fits well for hourly or daily energy t
 
 TimescaleDB can be installed as a separate service maintained by you, or using a ready-to-use Home Assistant add-on. The installation process is described on the [add-on github pages](https://github.com/expaso/hassos-addon-timescaledb?tab=readme-ov-file#installation).
 
-To perform needed changes, you will need a DB client. The first already built-in option is a `psql` console. To get to it, you have to enter the timescale add-on Docker.
+To execute actions described in this part of article, you will need a DB client. The first already built-in option is a `psql` console. You can access it directly from HA console:
 ```
-docker exec -it addon_77b2833f_timescaledb  /bin/bash
+docker exec -it addon_77b2833f_timescaledb  psql -U <username> <databasename>
 ```
 
-If you prefer a GUI client, you can use pgAdmin4 (also available as an HA add-on), or use other clients like DBeaver. In both cases, enabling exposition of the PostgreSQL port in TimescaleDB Add-on settings is required.
+If you prefer a GUI client, you can use pgAdmin4 (also available as an HA add-on), or use other clients like DBeaver (my favorite). In both cases, enabling exposition of the PostgreSQL port in TimescaleDB Add-on settings is required.
 
-Let's start with the creation of extensions needed later on:
+After TimescaleDB installation only `postgres` login role is available. If you create your own, make it `SUPERUSER` - it might be needed. Then be careful, it gives superpower ;)
+
+
+### Privileges
+I assume that TimescaleDB has been installed by the add-on installer, creating requested databases. It means, that owner of the created database(s) is `postgres` role and those databases are set to be accessible for any logged in role.
+
+:warning: login role `postgres` is the most privileged one in the system. It's a bad practice to provide such a privileges to component (if not needed).
+
+Lets create dedicated roles then. Right now I consider only roles for LTSS and Grafana.
+```sql
+CREATE ROLE app_ltss LOGIN PASSWORD 'some_password';
+CREATE ROLE app_grafana LOGIN PASSWORD 'another_password';
+ALTER ROLE app_grafana SET transaction_read_only = 'on';
+```
+
+Setting grafana's login role to read-only potentially brings some performance, let's agree  neglible one in our setup. Take it as the best practice.
+
+The LTSS will need an access to public schema, to create its table:
+```sql
+GRANT CREATE ON SCHEMA public to app_ltss;
+```
+
+### Extensions and objects
+Move to next step: create extensions needed later on:
 ```sql
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS timescaledb_toolkit;
@@ -138,33 +161,60 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 :bulb: By installing the `postgis` extension, we avoid the need to give LTSS component superuser privileges (which is attempting to install the extension otherwise).
 
-The `timescaledb_toolkit` enables additional time-series features. They are needed to work with continuously increasing energy values, like energy.
+The `timescaledb_toolkit` enables additional time-series features. They are needed to work with continuously increasing values, like energy.
 
 The `btree_gist` will be needed later on for cost reports creation.
 
-At the next step, let's create a dedicated schema. We will create new objects in this schema to maintain clarity.
+At the next step, let's create a dedicated schema. We will create new objects in this schema to maintain clarity (public schema is already crowded with TimescaleDb objects)
 ```sql
 CREATE SCHEMA ltss_energy;
+GRANT USAGE ON SCHEMA ltss_energy to public;
 ```
 
-**Timezone does matter!** Because we will work with data grouped by days, it's crucial to let the database work in the correct (desired) timezone. Otherwise, the results will be shifted. 
-You need to know that the Timezone is set for postgresql server, then can be overridden (in this order) by database settings, client application, and logged login role. 
+By default schemas are not accessible to any connected user (except superusers). The access might be given to particular role(s), or to all connected roles (as long as they passed privileges check on parent objects). The latter is achieved by giving privilege to `public` role.
 
-It seems that TimescaleDB add-on, installs PostgreSQL with UTC default timezone, then creates databases with TIMEZONE inherited from the operating system. Which is Europe/Prague for me. Since this, I need not worry about aligning time intervals.
+The same rule applies to objects created within this schema (excluding fuctions).
 
+### Timezone does matter!
+Because we will work with data grouped by days, it's crucial to let the database know desired timezone. Otherwise, the results might be shifted. It can be resolved by properly set databse, or passed to queries which require that information.
 
-I live in Europe/Prague time zone, and it seems that TimescaleDB add-on has configured it as expected, probably inheriting my HA OS configuration. But it's important that you check it out.
+It's important to know that currently active timezone depends on several settings, one overriding another, in this order: `server defaults -> database -> client connection -> login role`
 
+Some applications sets timezone on start of client connection (likely based on system settings, for example DBeaver). Others like `psql` or `Grafana` doesn't do this. In this case only server and database settings are evaluated. This information is important, especially if you observe different result of queries called using different applications.
 
+You can always check the current/active timezone and what is the source of this setting by calling:
 
-
-Depending on postgresql installation type, you 
-
-Last but not least, create a dedicated user for Home Assistant. For example:
 ```sql
-CREATE ROLE ha LOGIN PASSWORD 'some_password';
+SELECT setting, source FROM pg_settings WHERE name = 'TimeZone'
 ```
 
+Let's connect our database and check out the setting of server and database:
+
+```sql
+SELECT 'server' as source, boot_val AS timezone FROM pg_Settings WHERE name = 'TimeZone'
+UNION
+SELECT
+  'database' , split_part(cfg, '=', 2) AS timezone
+FROM pg_db_role_setting s
+JOIN pg_database d ON s.setdatabase = d.oid
+JOIN  unnest(s.setconfig) AS cfg ON TRUE
+WHERE datname = CURRENT_CATALOG AND split_part(cfg, '=', 1) = 'TimeZone'
+```
+
+It will output one or two rows. Server row indicates default server settings. TimescaleDB add-on sets it to UTC. Database row shows the setting for the database. If exists it will override server setting. If this setting matches your desired timezone - then we are done there.
+
+Otherwise we need to set it up either for database or a login role(s). I suggest to set it up for database if there are no arguments against. it will be taken into account by background TimescaleDB processes described later on.
+
+```sql
+ALTER DATABASE <databasename> SET TimeZone = 'your time zone';
+```
+
+While setting time zone, don't use abbreviations. Use full names like `Europe/Prague`. Such naming takes care about time shifts like DST, being properly working the whole year.
+The complete list of supported timezone names you may find calling this query:
+
+```sql
+SELECT * FROM pg_timezone_names
+```
 
 ## Configuring LTSS to Export Energy Sensors
 LTSS is the Home Assistant's custom component. It can be installed by HACS. 
@@ -172,19 +222,19 @@ Installation instructions are available in [project Github](https://github.com/f
 
 LTSS writes all data into a single table: `public.ltss` (without option to change). In the article, the table will be referenced just as `ltss` since schema `public` usually doesn't need to be explicitly referenced.
 
-During start, the LTSS checks the existence of `ltss` table. If it doesn't exist, it creates it as well as adds `postgis` extension to the database. For the latter operation, it requires superuser privileges. But as you remember, we have already installed it. 
+During start, the LTSS checks the existence of `ltss` table. If it doesn't exist. It also tries to add `postgis` extension to the database. For the latter operation, it requires superuser privileges. But as you remember, we have already installed it. 
 
 Once LTSS is installed, configure it to publish all needed sensors to TimescaleDB.
 
-> :warning: LTSS configuration changes require HA restart. 
+> :warning: Changes to LTSS configuration require HA restart. 
 
 Configuration of LTSS typically involves selecting the appropriate sensors in the integration’s configuration in configuration.yaml.
 
-Example below makes LTSS component connected to `ha_ltss` database available in TimescaleDB installed as HA add-on with user `ha`. It will publish specified glances sensors (unimportant from pov of this article, just example) and all sensors which name ends with `_hourly` phrase.
+Example below makes LTSS component connected to `ha_ltss` database available in TimescaleDB installed as HA add-on with user `app_ltss`. It will publish specified glances sensors (unimportant from pov of this article, just example) and all sensors which name ends with `_hourly` phrase.
 
 ```yaml
 ltss:
-  db_url: postgresql://ha:some_password@77b2833f-timescaledb/ha_ltss
+  db_url: postgresql://app_ltss:some_password@77b2833f-timescaledb/ha_ltss
   include:
     entities:
       - sensor.glances_cpu_load
@@ -271,11 +321,11 @@ Note, there is another tool to manage a large amount of data: compression (descr
 # Working with TimescaleDB
 
 Let's start with an ASCII art showing what we are going to achieve:
-* Source `ltss` data will be compressed, and the oldest data will be removed from the database
-* We create the first level aggregation (hourly) built over recent data found in the `ltss` table
-* We create the second-level aggregation (daily) built over the previous aggregation.
+* Older `ltss` data will be compressed, and the even older one will be removed from the database
+* We create the first level aggregation (hourly) being updated by recent data found in the `ltss` table
+* We create the second-level aggregation (daily) built updated by data from the previous aggregation.
 
-The diagram below depicts the time-wise dependencies between TimescaleDB objects we will create in this article.
+The diagram below depicts the time-wise dependencies between TimescaleDB objects accessing other ones. Note the fact, that CAGGs looks at source data limited by floating time window. It allows to delete old data from source objects.
 
 ```
       drop old data       compressed data 
@@ -293,7 +343,7 @@ CAGG daily ───────┴───────────────
                                                                       now
 ```
 
-💡 Anticipating the facts: we will be able to query aggregation (let's say daily CAGG), getting real-time data (like querying ltss table).
+💡 Anticipating the facts: querying daily aggregation doesn't make impossible to get real time results
 
 ## Hypertables
 The TimescaleDB introduces a new table engine, so-called hypertable. For a lot of use cases, it behaves like a traditional table. The underlying architecture makes it a special type of table designed for efficient time-series storage and querying.
@@ -360,7 +410,12 @@ WHERE entity_id = ANY (ltss_energy.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
 GROUP BY bucket, entity_id
 WITH NO DATA;
+
+GRANT SELECT ON VIEW ltss_energy.cagg_energy_hourly TO public;
 ```
+
+`GRANT` gives read only access to all connected users. 
+
 
 It might be useful to look at the existing CAGG in order to check out its definition:
 
@@ -492,6 +547,8 @@ SELECT
     SUM(value) AS value
 FROM ltss_energy.cagg_energy_hourly
 GROUP BY time_bucket('1 day'::interval, bucket), entity_id;
+
+GRANT SELECT ON VIEW ltss_energy.cagg_energy_hourly TO public;
 ```
 
 To keep it automatically updated, add a continuous aggregation policy:
