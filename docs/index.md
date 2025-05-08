@@ -420,9 +420,9 @@ Now CAGG definition, making use of the function above. The CAGG makes use of a `
 CREATE MATERIALIZED VIEW ltss_energy.cagg_energy_hourly
 WITH (timescaledb.continuous) AS
 SELECT
-    time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'::text) AS bucket,
+    time_bucket('1h'::INTERVAL, "time", 'Europe/Prague') AS bucket,
     entity_id,
-    delta(counter_agg("time", state::::DOUBLE PRECISSION)) AS value
+    delta(counter_agg("time", state::DOUBLE PRECISSION)) AS value
 FROM ltss
 WHERE entity_id = ANY (ltss_energy.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
@@ -432,11 +432,13 @@ WITH NO DATA;
 GRANT SELECT ON VIEW ltss_energy.cagg_energy_hourly TO public;
 ```
 
+:bulb: Notice a time zone passed to `time_bucket()` function. If the timezone resolved for database is connfigured as desired, passing it in CAGG is not needed.
+
 `GRANT` gives read-only access to all connected users.
 TimescaleDB background processes don't need special privileges.
 You, as a view creator (owner), are not limited by any privileges.
 
-It might be useful to look at the existing CAGG in order to check out its definition:
+It might be useful to look at the existing CAGG in order to check out its definition. It might look a bit different because the Postgresql tranforforms it slghltly. 
 
 ```sql
 SELECT * FROM timescaledb_information.continuous_aggregates;
@@ -491,10 +493,10 @@ But for us, the most useful is to set the CAGGs update policy, which ensures aut
 
 ```sql
 SELECT add_continuous_aggregate_policy(
-   'ltss_energy.cagg_energy_hourly',
-   start_offset => '1 hour'::INTERVAL,
-   end_offset => '15 minutes'::INTERVAL,
-   schedule_interval => '15 minutes'::INTERVAL
+   continuous_aggregate => 'ltss_energy.cagg_energy_hourly',
+   start_offset         => '1 hour'::INTERVAL,
+   end_offset           => '15 minutes'::INTERVAL,
+   schedule_interval    => '15 minutes'::INTERVAL
 );
 ```
 
@@ -561,24 +563,26 @@ Instead, we can define a daily CAGG based on the existing hourly CAGG with just 
 CREATE MATERIALIZED VIEW ltss_energy.cagg_energy_daily
 WITH (timescaledb.continuous) AS
 SELECT
-    time_bucket('1 day'::interval, bucket) AS bucket,
+    time_bucket('1 day'::interval, bucket, 'Europe/Prague') AS bucket,
     entity_id,
     SUM(value) AS value
 FROM ltss_energy.cagg_energy_hourly
-GROUP BY time_bucket('1 day'::interval, bucket), entity_id;
+GROUP BY 1,2;
 
 GRANT SELECT ON VIEW ltss_energy.cagg_energy_hourly TO public;
 ```
+
+> :bulb: While I don't like referencing a column by its oridinal number in projection, it's the cleanest way of referencing the `time_bucket()` result without duplicating the code. Using `bucket` in GROUP BY is not possible here, because source column is named the same way, while we want to keep CAGGs column names consistent across all CAGGs.
 
 To keep it automatically updated, add a continuous aggregation policy:
 
 ```sql
 SELECT add_continuous_aggregate_policy
 (
-   'ltss_energy.cagg_energy_daily',
-   start_offset => '1 day::INTERVAL',
-   end_offset => '4 hours'::INTERVAL,
-   schedule_interval => '2 hours'::INTERVAL
+   continuous_aggregate => 'ltss_energy.cagg_energy_daily',
+   start_offset         => '1 day::INTERVAL',
+   end_offset           => '4 hours'::INTERVAL,
+   schedule_interval    => '2 hours'::INTERVAL
 );
 ```
 
@@ -593,7 +597,7 @@ SET (timescaledb.materialized_only = false);
 
 As mentioned earlier, TimescaleDB hypertables offer built-in support for data compression, and I can say from experience:
 
-It’s a game changer.
+**It’s a cheat code**
 
 You can expect huge storage savings.
 For example, in my setup:
@@ -622,10 +626,10 @@ ALTER TABLE ltss
 SET
 (
    timescaledb.compress,
-   timescaledb.compress_orderby='time',
-   timescaledb.compress_segmentby='entity_id'
+   timescaledb.compress_orderby = 'time',
+   timescaledb.compress_segmentby = 'entity_id'
 );
-SELECT add_compression_policy('ltss', compress_after => '30d'::INTERVAL);
+SELECT add_compression_policy(hypertable => 'ltss', compress_after => '30d'::INTERVAL);
 ```
 
 This setup will automatically compress data chunks older than 30 days.
@@ -740,7 +744,8 @@ SELECT
     time_bucket_gapfill
     (
         '1day'::INTERVAL,      
-        "bucket", 'Europe/Prague'
+        "bucket",
+        'Europe/Prague'
     ) AS timeb,
     entity_id,
     SUM(value) AS value
