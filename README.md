@@ -3,7 +3,7 @@
 This article is the result of a deep dive into how to effectively store and visualize long-term energy data from Home Assistant. In the next sections, I'll explain why moving your data outside of Home Assistant to TimescaleDB can make a big difference and how you can do it.
 For me, it was also a first real hands-on experience with TimescaleDB (even though I had known about it for years).
 
-The article is structured as a step-by-step tutorial, starting with required components configuration, through TimescaleDB basics and ending with examples of Grafana visualizations. You'll find ready-to-use examples you can copy and adapt to your own setup, depending on the sensors you have.
+The article is structured as a step-by-step tutorial, starting with required components configuration, through TimescaleDB basics, and ending with examples of Grafana visualizations. You'll find ready-to-use examples you can copy and adapt to your own setup, depending on the sensors you have.
 
 What's covered:
 
@@ -43,7 +43,7 @@ TimescaleDB, a time-series extension of PostgreSQL, offers a more robust solutio
 
 Bonus: Grafana can bring all this data to life with interactive dashboards right from the start.
 
-All in one, with TimescaleDB, it’s possible to achieve energy analytics unavailable in HA, like the return value of FV installation collected over the years.
+All in one, with TimescaleDB, it’s possible to achieve energy analytics unavailable in HA, like the return value of FV installations collected over the years.
 
 ![ROI intro](images/roi_intro.png)
 
@@ -130,7 +130,7 @@ To execute actions described in this part of the article, you will need a DB cli
 docker exec -it addon_77b2833f_timescaledb  psql -U <username> <databasename>
 ```
 
-If you prefer a GUI client, you can use pgAdmin4 (also available as an HA add-on), or use other clients like DBeaver (my favorite). In both cases, enabling exposition of the PostgreSQL port in TimescaleDB Add-on settings is required.
+If you prefer a GUI client, you can use pgAdmin4 (also available as an HA add-on) or use other clients like DBeaver (my favorite). In both cases, enabling the exposition of the PostgreSQL port in TimescaleDB Add-on settings is required.
 
 After TimescaleDB installation, only the `postgres` login role is available. If you create your own, make it `SUPERUSER` - it might be needed. Then be careful, it gives a superpower ;)
 
@@ -138,7 +138,7 @@ After TimescaleDB installation, only the `postgres` login role is available. If 
 ### Privileges
 Assuming TimescaleDB was installed via the add-on installer and the necessary databases were created, those databases are accessible to any role that can authenticate.
 
-To operate LTSS and Grafana, we need to define dedicated login roles with minimal required privileges. Using the default postgres role is discouraged due to its broad and unrestricted permissions.
+To operate LTSS and Grafana, we need to define dedicated login roles with minimal required privileges. Using the default PostgreSQL role is discouraged due to its broad and unrestricted permissions.
 
 Let’s create roles specifically for LTSS and Grafana:
 ```sql
@@ -229,9 +229,9 @@ SELECT * FROM pg_timezone_names;
 LTSS is the Home Assistant's custom component. It can be installed by HACS. 
 Installation instructions are available in [project Github](https://github.com/freol35241/ltss?tab=readme-ov-file#installation).
 
-LTSS writes all data into a single table: `public.ltss` (without option to change). In the article, the table will be referenced just as `ltss` since schema `public` usually doesn't need to be explicitly referenced.
+LTSS writes all data into a single table: `public.ltss` (without option to change). In the article, the table will be referenced just as `ltss` since the schema `public` usually doesn't need to be explicitly referenced.
 
-During start, the LTSS checks the existence of `ltss` table. If it doesn't exist. It also tries to add `postgis` extension to the database. For the latter operation, it requires superuser privileges. But as you remember, we have already installed it. 
+During start, the LTSS checks the existence of the `ltss` table. If it doesn't exist. It also tries to add the `postgis` extension to the database. For the latter operation, it requires superuser privileges. But as you remember, we have already installed it. 
 
 Once LTSS is installed, configure it to publish all needed sensors to TimescaleDB.
 
@@ -239,7 +239,7 @@ Once LTSS is installed, configure it to publish all needed sensors to TimescaleD
 
 Configuration of LTSS typically involves selecting the appropriate sensors in the integration’s configuration in configuration.yaml.
 
-The example below makes LTSS component connected to `ha_ltss` database available in TimescaleDB installed as HA add-on with user `app_ltss`. It will publish specified Glances sensors (unimportant from pov of this article, just an example) and all sensors whose name ends with `_hourly` phrase.
+The example below makes LTSS component connected to the `ha_ltss` database available in TimescaleDB installed as an HA add-on with user `app_ltss`. It will publish specified Glances sensors (unimportant from pov of this article, just an example) and all sensors whose name ends with `_hourly` phrase.
 
 ```yaml
 ltss:
@@ -329,21 +329,21 @@ Note, there is another tool to manage a large amount of data: compression (descr
 
 ## Grafana
 
-Like TimescaleDB, you have option to use Home Assistant add-on or external Grafana. 
+For Grafana, you can choose to use the Home Assistant add-on or external Grafana. 
 Installation itself requires no notes.
 
-Grafana natively supports postgresql. The only thing is to configure a datasource within Grafana. Provide `77b2833f-timescaledb:5432` as Host Url, then database name, user name and password as created earlier. Enable TimescaleDB switch - it will enable TimescaleDB specific features in SQL builder. Configuration of diagrams described in this article will not be using it though.
+Grafana natively supports PostgreSQL. The only thing is to configure a datasource within Grafana. Provide `77b2833f-timescaledb:5432` as Host Url, then the database name, user name, and password as created earlier. Enable TimescaleDB switch - it will enable TimescaleDB-specific features in SQL builder. Although the configuration of diagrams described will not need it.
 
-:bulb: Note, data source offers no option to set TimeZone.
+:bulb: Note, the data source offers no option to set TimeZone.
 
 # Working with TimescaleDB
 
 Let's start with an ASCII art showing what we are going to achieve:
 * Older `ltss` data will be compressed, and the even older one will be removed from the database
-* We create the first level aggregation (hourly) being updated by recent data found in the `ltss` table
-* We create the second-level aggregation (daily) built updated by data from the previous aggregation.
+* We create the first level aggregation (hourly), being updated by recent data found in the `ltss` table
+* We create the second-level aggregation (daily), built on updated data from the previous aggregation.
 
-The diagram below depicts the time-wise dependencies between TimescaleDB objects accessing other ones. Note the fact, that CAGGs looks at source data limited by floating time window. It allows to delete old data from source objects.
+The diagram below depicts the time-wise dependencies between TimescaleDB objects accessing other ones. Note the fact that CAGGs look at source data through a floating time window. Considering CAGGs will never look again at old data, it allows the deletion of those data from source objects.
 
 ```
       drop old data       compressed data 
@@ -432,13 +432,13 @@ WITH NO DATA;
 GRANT SELECT ON VIEW ltss_energy.cagg_energy_hourly TO public;
 ```
 
-:bulb: Notice a time zone passed to `time_bucket()` function. If the timezone resolved for database is connfigured as desired, passing it in CAGG is not needed.
+:bulb: Notice a time zone passed to the `time_bucket()` function. If the timezone resolved for the database is configured as desired, passing it in CAGG is not needed anymore.
 
 `GRANT` gives read-only access to all connected users.
 TimescaleDB background processes don't need special privileges.
 You, as a view creator (owner), are not limited by any privileges.
 
-It might be useful to look at the existing CAGG in order to check out its definition. It might look a bit different because the Postgresql tranforforms it slghltly. 
+It might be useful to look at the existing CAGG in order to check out its definition. It might look a bit different because PostgreSQL transforms it slightly. 
 
 ```sql
 SELECT * FROM timescaledb_information.continuous_aggregates;
@@ -553,7 +553,7 @@ TimescaleDB offers a solution: Hierarchical Continuous Aggregates.
 This means you can create a CAGG based on another, more detailed CAGG, without touching the raw data.
 
 Here's a conceptual diagram (borrowed from the TimescaleDB blog):
-<div><img src="images/cagg_hierarchy.png" width=30%></div>
+<div><img src="images/cagg_hierarchy.png" width="30%"></div>
 
 In our use case, we don’t need as complicated dependency chains as above.
 Instead, we can define a daily CAGG based on the existing hourly CAGG with just a few lines of SQL:
@@ -878,17 +878,17 @@ This query will return:
 * `hourly` if the granularity is set to ‘1 hour’
 * `daily` for other time intervals (you can extend it to include monthly or annual CAGGs if needed).
 
-While this article proposes only hourly and daily CAGGs, you can extend that query in case of CAGGs representing more levels. For example querter-hour, monthly, yearly etc.
+While this article proposes only hourly and daily CAGGs, you can extend that query in case of CAGGs representing more levels. For example, quarter-hour, monthly, yearly, etc.
 
-The result should be visible on dashboard. If you chose Auto from Granularity, Query Granularity will change based on selected time range:
+The result should be visible on the dashboard. If you choose Auto from Granularity, Query Granularity will change based on the selected time range:
 ![Grafana Vars Hour](images/grafana_vars_hour.png)
 ![Grafana Vars Day](images/grafana_vars_day.png)
 ![Grafana Vars Month](images/grafana_vars_month.png)
 ![Grafana Vars Years](images/grafana_vars_year.png)
 
-You can opt for selecting desired granularity manually from Granularity dropbox.
+You can opt for selecting the desired granularity manually from the Granularity drop-down.
 
-If everything works as expected, Query Granularity and CAGG Suffix variables might be hidden from dashboard by setting `Show on Dashboard` to `Nothing`. 
+If everything works as expected, Query Granularity and CAGG Suffix variables might be hidden from the dashboard by setting `Show on Dashboard` to `Nothing`. 
 
 Now that we have the necessary variables (granularity, query_granularity, and cagg_suffix), we can create a new dynamic visualization in Grafana.
 
@@ -919,20 +919,20 @@ Rename transformation with regular expression set to .*(injected|purchased).* re
 
 To separate injected and purchased data, I decided to show injected energy on the negative side of the graph. To achieve that, I used the Override feature of Grafana. You can find it on the very bottom of the visualization properties.
 
-<div><img src="images/grafana_overrides.png" width=30%></div>
+<div><img src="images/grafana_overrides.png" width="30%"></div>
 
 Once dynamic cagg selection and granularity work, adjust the previously created graphs, making use of dynamic variables.
 
 ## Energy Usage
 
-The last graph from the energy category is something similar to what Home Assistant shows on its Energy page. It will show all energy data presented in previous charts into a bit different view.
+The last graph from the energy category is something similar to what Home Assistant shows on its Energy page. It will show all energy data presented in previous charts in a bit different view.
 
 ![Energy usage](images/grafana_energy_usage.png)
 
 The expected result is to get an overview of energy consumed vs superfluous.
 
 Let’s show the consumed energy above the X-axis. In my case, it consists of consumed solar and purchased energy.
-The energy injected into the grid as well as stored in the battery is considered superfluous.
+The energy injected into the grid, as well as stored in the battery, is considered superfluous.
 
 For this task, we need the following query:
 
