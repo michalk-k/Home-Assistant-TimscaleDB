@@ -1,9 +1,9 @@
 # Introduction
 
-This article is the result of a deep dive into how to effectively store and visualize long-term data from Home Assistant. In the next sections, I'll explain why moving your data outside of Home Assistant can make a big difference and how you can do it.
+This article is the result of a deep dive into how to effectively store and visualize long-term energy data from Home Assistant. In the next sections, I'll explain why moving your data outside of Home Assistant to TimescaleDB can make a big difference and how you can do it.
 For me, it was also a first real hands-on experience with TimescaleDB (even though I had known about it for years).
 
-The article is structured as a step-by-step tutorial, starting with TimescaleDB basics and ending with powerful Grafana visualizations. You'll find ready-to-use examples you can copy and adapt to your own setup, depending on the sensors you have.
+The article is structured as a step-by-step tutorial, starting with required components configuration, through TimescaleDB basics and ending with examples of Grafana visualizations. You'll find ready-to-use examples you can copy and adapt to your own setup, depending on the sensors you have.
 
 What's covered:
 
@@ -572,7 +572,7 @@ GROUP BY 1,2;
 GRANT SELECT ON VIEW ltss_energy.cagg_energy_hourly TO public;
 ```
 
-> :bulb: While I don't like referencing a column by its oridinal number in projection, it's the cleanest way of referencing the `time_bucket()` result without duplicating the code. Using `bucket` in GROUP BY is not possible here, because source column is named the same way, while we want to keep CAGGs column names consistent across all CAGGs.
+> :bulb: While I don't like referencing a column by its ordinal position in projection, it's the cleanest way of referencing the `time_bucket()` result without duplicating the code. Using `bucket` in `GROUP BY` is not possible here, because source column is named the same way, while we want to keep CAGGs column names consistent across all CAGGs.
 
 To keep it automatically updated, add a continuous aggregation policy:
 
@@ -791,6 +791,13 @@ Now it’s time to configure the visualization itself. In this case, a Bar Chart
 
 By following these steps, you can easily visualize the total energy consumption in your house and make the data more insightful in Grafana!
 
+## FVE panels production
+
+Just by replacing entity names and adjusting Rename fields transformation, you can achieve visualization of photovoltaic panels production:
+
+![Consumption Graph](images/grafana_pv.png)
+
+
 ## Dynamic Data Source for Flexible Granularity
 
 Previously, we visualized daily results based on hourly CAGGs. Now, let’s enhance the visualization with a dynamic data source selection and the ability to choose the aggregation level (hourly, daily, monthly, annually) based on user input or time range.
@@ -808,6 +815,7 @@ Understanding Grafana’s dynamic setup may take some time, but I’ll provide a
 
 * Type: Custom
 * Name: granularity
+* Label: Granularity
 * Description: List of available granularity types (auto, hourly, daily, etc.)
 * Show on Dashboard: Label and Value
 * Custom Options: `Auto, hour: 1 hour, day: 1 day, month: 1 month, year: 1 year`
@@ -820,18 +828,22 @@ This variable will automatically determine the granularity based on the time ran
 
 * Type: Query
 * Name: query_granularity
+* Label: Query Granularity
 * Description: Determines how to group the data based on the selected time range.
+* Show on Dashboard: Label and Value
 * Query: 
 
 ```sql
 SELECT 
     CASE WHEN '$granularity'  = 'Auto' THEN
-        CASE 
-           WHEN (to_timestamp($__to/1000) - to_timestamp($__from/1000)) > '2 months'::INTERVAL 
-           THEN '1 month'::INTERVAL
-           WHEN (to_timestamp($__to/1000) - to_timestamp($__from/1000)) > '3 days'::INTERVAL
-           THEN '1 day'::INTERVAL
-           ELSE '1 hour'::INTERVAL
+        CASE
+            WHEN (to_timestamp($__to/1000) - to_timestamp($__from/1000)) > '12 months'::INTERVAL 
+            THEN '1 year'::INTERVAL
+            WHEN (to_timestamp($__to/1000) - to_timestamp($__from/1000)) > '2 months'::INTERVAL 
+            THEN '1 month'::INTERVAL
+            WHEN (to_timestamp($__to/1000) - to_timestamp($__from/1000)) > '3 days'::INTERVAL
+            THEN '1 day'::INTERVAL
+            ELSE '1 hour'::INTERVAL
         END
     ELSE REPLACE('$granularity', 'Auto', '0')::INTERVAL 
     END;
@@ -839,18 +851,20 @@ SELECT
 
 This query dynamically adjusts the granularity depending on the time range:
 
+* Year if the range is greater than 12 months
 * Month if the range is greater than 2 months
 * Day if the range is greater than 3 days
 * Hour if the range is narrower than 3 days
 
-
-**Variable 3: Name Granularity**
+**Variable 3: CAGG Suffix**
 
 The purpose of this variable is to ensure the most suitable CAGG is used for the requested granularity. Since our CAGGs follow a naming convention (e.g., cagg_energy_hourly, cagg_energy_daily), we can just replace the suffix of the CAGG name to achieve that.
 
 * Type: Query
-* Name: name_granularity
+* Name: cagg_suffix
+* Label: CAGG Suffix
 * Description: Returns the appropriate suffix for the CAGG table name based on the selected granularity.
+* Show on Dashboard: Label and Value
 * Query:
 
 ```sql
@@ -865,7 +879,19 @@ This query will return:
 * `hourly` if the granularity is set to ‘1 hour’
 * `daily` for other time intervals (you can extend it to include monthly or annual CAGGs if needed).
 
-Now that we have the necessary variables (granularity, query_granularity, and name_granularity), we can create a new dynamic visualization in Grafana.
+While this article proposes only hourly and daily CAGGs, you can extend that query in case of CAGGs representing more levels. For example querter-hour, monthly, yearly etc.
+
+The result should be visible on dashboard. If you chose Auto from Granularity, Query Granularity will change based on selected time range:
+![Grafana Vars Hour](images/grafana_vars_hour.png)
+![Grafana Vars Day](images/grafana_vars_day.png)
+![Grafana Vars Month](images/grafana_vars_month.png)
+![Grafana Vars Years](images/grafana_vars_year.png)
+
+You can opt for selecting desired granularity manually from Granularity dropbox.
+
+If everything works as expected, Query Granularity and CAGG Suffix variables might be hidden from dashboard by setting `Show on Dashboard` to `Nothing`. 
+
+Now that we have the necessary variables (granularity, query_granularity, and cagg_suffix), we can create a new dynamic visualization in Grafana.
 
 ## Grid visualization
 
@@ -884,7 +910,7 @@ SELECT
     ) AS timeb,
     entity_id,
     SUM(value) AS value
-FROM ltss_energy.cagg_energy_${name_granularity}
+FROM ltss_energy.cagg_energy_${cagg_suffix}
 WHERE entity_id IN ('sensor.energy_injected_hourly', 'sensor.energy_purchased_hourly')
 AND $__timeFilter("bucket")
 GROUP BY timeb, entity_id
@@ -896,7 +922,7 @@ To separate injected and purchased data, I decided to show injected energy on th
 
 <div><img src="images/grafana_overrides.png" width=30%></div>
 
-Once dynamic cagg selection and granularity work, adjustment the previously created Consumption graph, making use of dynamic variables.
+Once dynamic cagg selection and granularity work, adjust the previously created graphs, making use of dynamic variables.
 
 ## Energy Usage
 
@@ -915,7 +941,7 @@ For this task, we need the following query:
 SELECT
     time_bucket_gapfill
     (
-        '$query_granularity'::interval,      
+        '$query_granularity'::INTERVAL,      
         "bucket", 'Europe/Prague'
     ) AS timeb,
     CASE WHEN entity_id ~ 'injected'   THEN 'Injected'
@@ -925,7 +951,7 @@ SELECT
         WHEN entity_id ~ '_discharged' THEN 'Discharged'
     END AS entityid2,
     SUM(value) AS value
-FROM ltss_energy.cagg_energy_${name_granularity}
+FROM ltss_energy.cagg_energy_${cagg_suffix}
 WHERE entity_id  IN (
                         'sensor.energy_injected_hourly',
                         'sensor.energy_purchased_hourly',
@@ -1033,7 +1059,7 @@ Let’s do some graphs now.
 
 ![Price Evolution](images/grafana_prices_evolution.png)
 
-Since the table with prices contains ranges (instead of points in time), we need to generate time series out of it within a SQL query. For this task generate_series() function is the best choice. Note, using the Grafana $query_granularity variable, which command generate_series to generate datapoints in hourly or daily resolution.
+Since the table with prices contains ranges (instead of points in time), we need to generate time series out of it within a SQL query. For this task `generate_series()` function is the best choice. Note, using the Grafana $query_granularity variable, which command `generate_series` to generate datapoints in hourly or daily resolution.
 
 ```sql
 SELECT time, cost_type, cost_kind, cost_value
@@ -1078,13 +1104,13 @@ SELECT
             ltss_energy.calculate_cost
             (
                 CASE WHEN entity_id ~ 'injected' THEN 'sale'
-                    WHEN entity_id ~ 'purchased' THEN 'purchase'
-                    WHEN entity_id ~ 'cube|mainhouse' THEN 'purchase'
+                     WHEN entity_id ~ 'purchased' THEN 'purchase'
+                     WHEN entity_id ~ 'cube|mainhouse' THEN 'purchase'
                 END,
                 bucket, value::NUMERIC
             )
         ) AS value
-FROM ltss_energy.cagg_energy_${name_granularity}
+FROM ltss_energy.cagg_energy_${cagg_suffix}
 WHERE entity_id IN
      (
          'sensor.energy_injected_hourly',
@@ -1123,9 +1149,9 @@ src AS
         "bucket", 'Europe/Prague'
     ) AS timeb,
     CASE WHEN entity_id ~ 'injected' THEN 'Injected'
-        WHEN entity_id ~ 'purchased' THEN 'Purchased'
-        WHEN entity_id ~ 'cube|mainhouse' THEN 'Consumption'
-        ELSE entity_id
+         WHEN entity_id ~ 'purchased' THEN 'Purchased'
+         WHEN entity_id ~ 'cube|mainhouse' THEN 'Consumption'
+         ELSE entity_id
     END AS entityid2,
     SUM(CASE
             WHEN bucket < '2024-08-08' THEN 0 
@@ -1137,8 +1163,9 @@ src AS
                     END, 
                     bucket, value::NUMERIC
                 )
-        END) AS value
-    FROM ltss_${name_granularity}
+        END
+        ) AS value
+    FROM ltss_${cagg_suffix}
     WHERE entity_id  IN (
                             'sensor.energy_injected_hourly', 
                             'sensor.energy_purchased_hourly',
