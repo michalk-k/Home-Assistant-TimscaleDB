@@ -553,8 +553,7 @@ TimescaleDB offers a solution: Hierarchical Continuous Aggregates.
 This means you can create a CAGG based on another, more detailed CAGG, without touching the raw data.
 
 Here's a conceptual diagram (borrowed from the TimescaleDB blog):
-
-![|191x250](https://lh7-rt.googleusercontent.com/docsz/AD_4nXfqi-06JEio27didAnjeV7rrWtVvFhZuAAhGeNrJWTwTFg6laufqaxuyV6wWKz7H_uvEwMN25ovEvpA_SHNWFtAimqVQZyAoxOH8CWp7JHCt3tkUBb8iztw0BqJKIcVGuRihQoP?key=lxjGOMoRy8aXFNM_LTsRQxoa)
+<div><img src="images/cagg_hierarchy.png" width=30%></div>
 
 In our use case, we don’t need as complicated dependency chains as above.
 Instead, we can define a daily CAGG based on the existing hourly CAGG with just a few lines of SQL:
