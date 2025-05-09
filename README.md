@@ -836,7 +836,7 @@ This variable will automatically determine the granularity based on the time ran
 SELECT 
     CASE WHEN '$granularity'  = 'Auto' THEN
         CASE
-            WHEN (to_timestamp($__to/1000) - to_timestamp($__from/1000)) > '12 months'::INTERVAL 
+            WHEN (to_timestamp($__to/1000) - to_timestamp($__from/1000)) > '24 months'::INTERVAL 
             THEN '1 year'::INTERVAL
             WHEN (to_timestamp($__to/1000) - to_timestamp($__from/1000)) > '2 months'::INTERVAL 
             THEN '1 month'::INTERVAL
@@ -850,7 +850,7 @@ SELECT
 
 This query dynamically adjusts the granularity depending on the time range:
 
-* Year if the range is greater than 12 months
+* Year if the range is greater than 24 months
 * Month if the range is greater than 2 months
 * Day if the range is greater than 3 days
 * Hour if the range is narrower than 3 days
