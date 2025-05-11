@@ -60,8 +60,20 @@ The next paragraphs go through key points of configuration.
 
 ### Home Assistant Sensors
 
-Before we move on with the database, we need to acknowledge the character of data and make sure HA provides sensors we can use later.
+Before we move on with the database, we need to acknowledge the character of data and make sure HA provides sensors we can use later. The article is about collecting energy data, thus focusing on energy sensors only. Examples found in the article are built upon the following measurements:
 
+* household consumption
+* energy purchased (equal to house consumption prior FVA installation)
+* energy injected
+* FV panels production
+* energy charged to batteries
+* energy discharged from batteries
+
+To achieve the goal smoothly, it's best to stick to the following rules:
+* provide utility sensors for energy (at least hourly)
+* make them consistent unit-wise. My proposal: kWh
+
+[details="Read explanation to these requirements"]
 In general, energy data tracked by Home Assistant sensors grows in time indefinitely. Optionally, it's allowed that from time to time the value is reset to zero and starts counting again. The reset can be triggered by a measurement device or by HA itself (utility sensors) at any time.
 
 It's important to understand this concept because it makes common methods like sum or delta not applicable to data evolving this way. Managing it using common SQL might be pretty complex. 
@@ -103,7 +115,7 @@ Worth mentioning that utility sensors (regardless of reset time interval) based 
 In this article, we assume hourly data as the baseline.
 This could be considered enough for most use cases, unless you're dealing with other needs like quarter-hourly data, for often used for spot market energy trading.
 
-### Consistent Units for Energy Sensors
+#### Consistent Units for Energy Sensors
 
 Home Assistant can create energy sensors with different units — for example, Wh, kWh, or even MWh.
 When you configure your utility meters, make sure all related sensors use the same unit.
@@ -165,16 +177,6 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 * `timescaledb_toolkit` – Enables additional time-series features needed for handling continuously increasing values like energy consumption.
 * `btree_gist` – Required later for advanced indexing when generating cost reports.
 
-### Schema organization
-Now let’s create a dedicated schema. This keeps our objects organized and avoids polluting the already-crowded public schema used by TimescaleDB:
-```sql
-CREATE SCHEMA ltss_energy;
-GRANT USAGE ON SCHEMA ltss_energy to public;
-```
-By default, database users don't automatically have access to schemas unless explicitly granted. You can assign schema access either to specific roles or, if you want to allow access to all authenticated users, to the public pseudo-role, as shown above.
-
-This same rule applies to objects created within the schema (except for functions).
-
 ### Timezone does matter!
 Because we’re working with data grouped by days, it’s critical to ensure that the database uses the correct timezone. Otherwise, query results can be misaligned—for example, a "midnight" timestamp might fall on the wrong day depending on the timezone.
 
@@ -231,7 +233,7 @@ Installation instructions are available in [project Github](https://github.com/f
 
 LTSS writes all data into a single table: `public.ltss` (without option to change). In the article, the table will be referenced just as `ltss` since the schema `public` usually doesn't need to be explicitly referenced.
 
-During start, the LTSS checks the existence of the `ltss` table. If it doesn't exist. It also tries to add the `postgis` extension to the database. For the latter operation, it requires superuser privileges. But as you remember, we have already installed it. 
+During start, the LTSS checks the existence of the `ltss` table. It creates that table if it doesn't exist. It also tries to add the `postgis` extension to the database. For the latter operation, it requires superuser privileges. But as you remember, we have already installed it.
 
 Once LTSS is installed, configure it to publish all needed sensors to TimescaleDB.
 
@@ -327,6 +329,12 @@ EXECUTE FUNCTION public.ltss_strip_attributes();
 This trigger is especially useful when storing large amounts of sensor data where the attributes field may otherwise bloat the database.
 Note, there is another tool to manage a large amount of data: compression (described later).
 
+Before we jump into Grafana, let's connect the database again and set the privileges of the newly created table to allow reading it by any connected user. It's not needed when using continuous aggregates, but might be useful when playing with origin data.
+
+```sql
+GRANT SELECT ON TABLE ltss TO public;
+```
+
 ## Grafana
 
 For Grafana, you can choose to use the Home Assistant add-on or external Grafana. 
@@ -391,7 +399,19 @@ Earlier in the article, I mentioned that utility sensors refresh at the same rat
 
 Before we jump into CAGGs, let’s start with a helper function. Believe me or not, changes to processed entity names, renaming them, is something that just happens, especially at the beginning of the setup. For example, I found that it’s better to have a generic name for injected/purchased energy rather than use names dependent on a measuring device. I renamed them in HA, but then needed to reflect the change in a CAGG. Another situation was the need to cover pre-FV a FV eras together.
 
-Anyway, I found out that it’s easier to add a new sensor name or manipulate its name when the list of sensors is provided by the utility function, rather than hardcoded within a CAGG. There is no option to update the statement of the materialized view. At the same time, the function can be replaced at any time. Notice the IMMUTABLE keyword in this function definition.
+Anyway, I found out that it’s easier to add a new sensor name or manipulate its name when the list of sensors is provided by the utility function, rather than hardcoded within a CAGG. There is no option to update the statement of the materialized view. At the same time, the function can be replaced at any time.
+
+Before anything, lets keep our objects organized within dedicated schema and avoids polluting the already-crowded `public` schema used by TimescaleDB:
+```sql
+CREATE SCHEMA ltss_energy;
+GRANT USAGE ON SCHEMA ltss_energy to public;
+```
+
+By default, database users don't automatically have access to schemas unless explicitly granted. You can assign schema access either to specific roles or, if you want to allow access to all authenticated users, to the public pseudo-role, as shown above.
+
+This same rule applies to objects created within the schema (except for functions).
+
+Then create the helper function.  Notice the IMMUTABLE keyword in this function definition, which ensures higher performance for a function that always returns the same result. 
 
 ```sql
 CREATE OR REPLACE FUNCTION ltss_energy.get_entities_for_cagg_energy()
@@ -429,7 +449,7 @@ WHERE entity_id = ANY (ltss_energy.get_entities_for_cagg_energy())
 GROUP BY bucket, entity_id
 WITH NO DATA;
 
-GRANT SELECT ON VIEW ltss_energy.cagg_energy_hourly TO public;
+GRANT SELECT ON TABLE ltss_energy.cagg_energy_hourly TO public;
 ```
 
 :bulb: Notice a time zone passed to the `time_bucket()` function. If the timezone resolved for the database is configured as desired, passing it in CAGG is not needed anymore.
@@ -449,7 +469,7 @@ The `WITH NO DATA` clause makes the view be created immediately, but without com
 CALL refresh_continuous_aggregate('ltss_energy.cagg_energy_hourly', NULL, NOW()-'2h'::INTERVAL);
 ```
 
-Note: This query will run a background process. The NULL passed to the second parameter means ‘take data from the past`. The 3rd argument adds a 2-hour buffer to not interfere with data being added in real-time.
+The NULL passed to the second parameter means ‘take data from the past`. The 3rd argument adds a 2-hour buffer to not interfere with data being added in real-time.
 
 There are several limitations when writing CAGGs. Most important to remember are:
 
@@ -568,10 +588,10 @@ SELECT
 FROM ltss_energy.cagg_energy_hourly
 GROUP BY 1,2;
 
-GRANT SELECT ON VIEW ltss_energy.cagg_energy_hourly TO public;
+GRANT SELECT ON TABLE ltss_energy.cagg_energy_hourly TO public;
 ```
 
-> :bulb: While I don't like referencing a column by its ordinal position in projection, it's the cleanest way of referencing the `time_bucket()` result without duplicating the code. Using `bucket` in `GROUP BY` is not possible here, because source column is named the same way, while we want to keep CAGGs column names consistent across all CAGGs.
+> :bulb: While I don't like referencing a column by its ordinal position in projection, it's the cleanest way of referencing the `time_bucket()` result without duplicating the code. Using `bucket` in `GROUP BY` is not possible here, because the source column is named the same way, while we want to keep CAGGs column names consistent across all CAGGs.
 
 To keep it automatically updated, add a continuous aggregation policy:
 
@@ -579,7 +599,7 @@ To keep it automatically updated, add a continuous aggregation policy:
 SELECT add_continuous_aggregate_policy
 (
    continuous_aggregate => 'ltss_energy.cagg_energy_daily',
-   start_offset         => '1 day::INTERVAL',
+   start_offset         => '1 day'::INTERVAL,
    end_offset           => '4 hours'::INTERVAL,
    schedule_interval    => '2 hours'::INTERVAL
 );
@@ -782,11 +802,11 @@ Once the query is set, it's time to adjust the data in Grafana. The next step in
 
 **Configuring the Visualization**
 
-Now it’s time to configure the visualization itself. In this case, a Bar Chart is the most suitable type of graph for displaying the consumption in time interval.
+Now it’s time to configure the visualization itself. In this and most other cases mentioned in this article, a Bar Chart is the most suitable type of graph for displaying the consumption in a time interval.
 
 💡 If you’re visualizing data from multiple sensors, you might want to use the Stacking mode for the bars.
 
-💡 Important Note: Stacking mode requires that all axes share the same time intervals. If the time intervals are different, the bars won’t stack correctly. This is why we use the time_bucket_gapfill() function in the query, which ensures consistent time intervals, even if data is missing for certain periods.
+💡 Important Note: Stacking mode requires that all axes share the same time intervals. If the time intervals are different, the bars won’t stack correctly. This is why we use the `time_bucket_gapfill()` function in the query, which ensures consistent time intervals, even if data is missing for certain periods.
 
 By following these steps, you can easily visualize the total energy consumption in your house and make the data more insightful in Grafana!
 
