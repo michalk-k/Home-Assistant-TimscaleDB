@@ -156,7 +156,9 @@ Let’s create roles specifically for LTSS and Grafana:
 ```sql
 CREATE ROLE app_ltss LOGIN PASSWORD 'some_password';
 CREATE ROLE app_grafana LOGIN PASSWORD 'another_password';
+ALTER ROLE app_grafana SET statement_timeout = '5s';
 ```
+> :bulb: When running the system on low-performance hardware like a Raspberry Pi, it's easy to overload the device to the point where it may struggle to recover on its own. To mitigate this, you can set a statement timeout for Grafana’s database role, ensuring that no Grafana query runs longer than 5 seconds. 
 
 LTSS needs permission to create tables in the public schema:
 ```sql
