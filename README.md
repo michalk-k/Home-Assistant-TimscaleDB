@@ -444,7 +444,7 @@ WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague') AS bucket,
     entity_id,
-    delta(counter_agg("time", state::DOUBLE PRECISSION)) AS value
+    delta(counter_agg("time", state::DOUBLE PRECISION)) AS value
 FROM ltss
 WHERE entity_id = ANY (ltss_energy.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
@@ -590,7 +590,7 @@ SELECT
 FROM ltss_energy.cagg_energy_hourly
 GROUP BY 1,2;
 
-GRANT SELECT ON TABLE ltss_energy.cagg_energy_hourly TO public;
+GRANT SELECT ON TABLE ltss_energy.cagg_energy_daily TO public;
 ```
 
 > :bulb: While I don't like referencing a column by its ordinal position in projection, it's the cleanest way of referencing the `time_bucket()` result without duplicating the code. Using `bucket` in `GROUP BY` is not possible here, because the source column is named the same way, while we want to keep CAGGs column names consistent across all CAGGs.
