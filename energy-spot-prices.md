@@ -1,12 +1,10 @@
-# Preface
+## Preface
 The previous part presents how to work with static or relatively slow-changing energy prices. At the same time, it mentions, if you work with spot prices, which usually change on hourly basis, a slightly another approach is needed.
 Here is a walk-through for users operating on spot.
 
-Let’s show what the data structure should look like for this task.
+Let’s create all objects in dedicated schema: `ltss_energy_ote`. This way both methods of collecting data may exists being physically separated from each other.
+The OTE refers to spot prices operator in Czech Republic. You can chose whatever suffix you work for you. Here is an overview of objects to be created. 
 
-<image showing prices table, and caggs, possibly helper functions>
-
-Let’s create all objects in new schema: `ltss_energy_ote`. The OTE refers to spot prices operator in Czech Republic. You can chose whatever suffix you want.
 
 ```mermaid
 classDiagram
@@ -52,34 +50,36 @@ classDiagram
     }
 ```
 
-The idea looks pretty similar to one described in the previous article. There are two major differences:
+The idea looks pretty similar to the one described in the previous article. There are two major differences:
 
-* we will calculate and store a prices (purchase and sale) of the energy for each aggregated record
-* we will adjust the datatype handling time range to range of timestamps with time zone (TSTZRANGE)
+* we will calculate and store a prices (purchase and sale) together with energy
+* we will adjust the datatype that handles time range to one suitable for timestamps with time zone (TSTZRANGE)
 
 Having prices already materialized in CAGGs helps with performance. For instance, rendering graphs doesn't require lookups to prices table. It's helpful especially when running on performance-limited hardware like RaspberyPi. 
 
-The cons is, that if you change prices in the table for past period, you need to recalculate CAGGs.
+The cons is, that changing prices for past period requires recalculation of CAGGs. No problem when having source data. Otherwise update must be performed directly to CAGGs data.
 
-Let's start with with DDL of table for costs:
+## Prices
+
+Let's start with with new costs table:
 
 ```sql
 CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_cost
 (
-    cost_type text NOT NULL,
-    cost_kind text NOT NULL,
-    cost_range tstzrange NOT NULL,
-    cost_value numeric NOT NULL,
-    cost_unit text NOT NULL,
+    cost_type TEXT NOT NULL,
+    cost_kind TEXT NOT NULL,
+    cost_range TSTZRANGE NOT NULL,
+    cost_value NUMERIC NOT NULL,
+    cost_unit TEXT NOT NULL,
     CONSTRAINT pk_electricitycost PRIMARY KEY (cost_type, cost_kind, cost_range),
     CONSTRAINT xc_electricitycost_costrange EXCLUDE USING gist (cost_type WITH =, cost_kind WITH =, cost_range WITH &&)
 );
 ```
 
 The next step is to fill this table with data.
-Because new CAGGs will add prices to each aggregation, the source prices for a particular period must be already available at moment of CAGG execution.
+Because new CAGGs will add prices to each aggregation, the source prices for a particular period must be already available in prices table at moment of CAGG execution.
 
-How to achieve it will depend strictly on the way of how the prices are collected by your HA instance.
+How to achieve it will depend strictly on the way of how the prices are collected by your HA instance. You can use HA custom integration is available, you can use NodeRed or even own script. The point is to make the prices land in the `electricity_cost` table.
 
 The simplest option is to have a sensor carrying the current price. Then publish this sensor via LTSS to the database, and then use a trigger to save its value to our table on every change. It will require the following trigger to create on ltss table:
 
@@ -98,27 +98,14 @@ DECLARE
 BEGIN
     -- THIS TRIGGER FUNCTION IS USED on public.ltss table
 
-    IF NEW.entity_id <> ENTITYID
-    THEN
-        RETURN NEW;
+    IF NEW.entity_id <> ENTITYID THEN
+        RETURN NULL;
     END IF;
 
     INSERT INTO ltss_energy_ote.electricity_cost
-    (
-        cost_type,
-        cost_kind,
-        cost_range,
-        cost_value,
-        cost_unit
-    )
+    (cost_type, cost_kind, cost_range, cost_value, cost_unit)
     VALUES
-    (
-        'sale',
-        'energy',
-        tstzrange(EVENTTIME, EVENTTIME + '1h'::INTERVAL, '[)'),
-        state::NUMERIC,
-        'kWh'
-    )
+    ('sale', 'energy', tstzrange(EVENTTIME, EVENTTIME + '1h'::INTERVAL, '[)'), state::NUMERIC, 'kWh')
     ON CONFLICT DO NOTHING;
 
     RETURN NULL;
@@ -136,22 +123,20 @@ AFTER INSERT
 ON public.ltss
 FOR EACH ROW
 EXECUTE FUNCTION ltss_energy.tr_ltss_otaprices();
-
 ```
 
-The trigger makes a range out of "time" column. It assumes the change is reported a fraction of second after every hour beginning.
 Notice the implementation of error handling. It's important to ignore any error raised by this trigger, otherwise it would roll the transaction inserting data back.
 
-This approach above has one shortcoming: there is no guarantee that a price is reported early enough, to be picked by CAGG. If it happens,the calculated price for energy would be NULL. There are ways how to workaround that, but instead I would focus on solution based on prices reported in advance. Knowing prices for future periods should be something common when operating with the spot proces.
+The trigger makes a range out of the "time" column. It assumes that the value is reported within a time period the value is valid for. This is a shortcoming: the import as to be reliable all the time, otherwise you might lost entries price (ie because of HA restart).
 
-Note that exact solution strongly depends on how prices data are collected by HA. Different integrations might provide them in different way. But the common goal is to store those data into prices table.
+So let's try another approach. SPOT prices should be available in advance. I assume there ways how to get them to HA. Note, that exact solution strongly depends on how prices data are collected by HA. Different integrations might provide them in different way. But the common goal is to store those data into prices table.
 
 Let assume we have a `sensor.tomorrow_spot_electricity_prices` sensor, containing next day prices stored as json array in the entity `attributes`:
 ```json
 "data": [
-    {"time": "itotime1", "price": value1},
-    {"time": "itotime2", "price": value2},
-    {"time": "itotime3", "price": value3}
+    {"time": "time1", "price": value1},
+    {"time": "time2", "price": value2},
+    {"time": "time3", "price": value3}
     ...
 ]
 ```
@@ -238,10 +223,39 @@ template:
 ```
 </details>
 
+## Prices visualization
+Once we have a prices in the table we can visualize them.
 
-Having prices available in the databe, we can write new CAGGs. As mentioned above, they will not only aggregate the energy, but also calculate the partial prices for those energy chunks. 
+![Grafana prices hourly](images/grafana-prices-ote.png)
 
-First, let’s create a function providing the price for a given amount of energy and cost type. CAGGS will also make use of `get_entities_for_cagg_energy()` helper function, which is used to pass only energy entitites to CAGGS
+The query provided in previous article makes points fixed to 1-day period, which is not suitable for our new hourly prices. On the other hand chaning this period to 1-hour makes the query very slow (about 1.5s on rPi for 1 year of data).
+
+Let's modify the query by generating time points only for slowly changing prices. It might be distribution and/or purchase prices. 
+Sale prices will be displayed without artificially generating data points since we expect that those data has periodic character anyway. 
+The result will be the UNION of two subqueries you have to put into Grafana:
+
+```sql
+SELECT time, cost_type, cost_kind, cost_value
+FROM electricity_cost AS ec
+JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 day'::interval) AS x(time) ON TRUE
+WHERE x.time::DATE <@ cost_range
+AND cost_type <> 'sale'
+
+UNION
+
+SELECT LOWER(cost_range) AS time, cost_type, cost_kind, cost_value
+FROM ltss_energy.electricity_cost_ote AS ec
+WHERE LOWER(cost_range) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
+AND cost_type = 'sale'
+
+ORDER BY time, cost_type, cost_kind
+```
+
+## Aggregates for Energy
+
+With prices ready to use, we can start with CAGGs. As mentioned at the article begining, we won't aggregate the energy only, but also calculate the partial prices for those aggregated energy periods. 
+
+Before we jump into CAGGs, let’s create a `calculate_cost()` function that calculates a price of energy at given time. CAGGs will also make use of `get_entities_for_cagg_energy()` helper function, that enables calculation for selected entitites only.
 
 
 ```sql
@@ -284,9 +298,10 @@ AS $f$
 $f$;
 ```
 
-Now we are ready to create hierarchical CAGGs. The houlry one aggregates data from ltss, calculates prices for each period. The second one just sums the hourly values into daily results:
+Now we are ready to create hierarchical CAGGs. The hourly one aggregates data from the `ltss` table, providing sum of energy and its prices for the period. The second one just sums the hourly values into daily results:
 
 ```sql
+-- create hourly CAGG based on ltss table
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
 WITH (timescaledb.continuous) AS
 SELECT
@@ -298,10 +313,10 @@ SELECT
 FROM ltss
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
-GROUP BY 1,2
+GROUP BY 1, 2
 WITH NO DATA;
 
-
+-- create daily CAGG based on hourly one
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_daily
 WITH (timescaledb.continuous) AS
 SELECT
@@ -314,13 +329,14 @@ FROM ltss_energy_ote.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
 
-
+-- make both CAGGs real-time
 ALTER MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
 SET (timescaledb.materialized_only = FALSE);
 
 ALTER MATERIALIZED VIEW ltss_energy_ote.cagg_energy_daily
 SET (timescaledb.materialized_only = FALSE);
 
+-- start CAGGs refreshing automatically
 SELECT add_continuous_aggregate_policy
 (
    'ltss_energy_ote.cagg_energy_hourly', '4h'::INTERVAL, '5m'::INTERVAL, '15m'::INTERVAL
@@ -331,13 +347,13 @@ SELECT add_continuous_aggregate_policy
 );
 ```
 
-
-As described previously, WITH NO DATA means that CAGGs are not filled with data at the moment of their creation. Once aggregate policies are created, they will start to be filled with data coming to ltss (with frequency given by aggregate policy).
+As learnt in the previous part, `WITH NO DATA` indicates that CAGGs are not filled with data at the moment of their creation. Once aggregate policies are created, they fills CAGGs with data coming to ltss.
 
 If you want to populate CAGGs with historical data available in ltss table, execute refresh procedures. Obviously hourly CAGG first, then daily one.
 
 ```sql
-CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_hourly', window_start, window_end, TRUE);
-CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_daily', window_start, window_end, TRUE);
+CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_hourly', '2025-01-01 0:0', NOW()-'5h'::INTERVAL, TRUE);
+CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_daily', '2025-01-01 0:0', NOW()-'4d'::INTERVAL, TRUE);
 ```
 
+> :exclamation: **Be aware** to not run `resfresh_continuous_aggregate()` on missing data while their aggregated form does exist in CAGGs. It would wipe them irreversibly out!
