@@ -1,5 +1,8 @@
 ## Preface
 The previous part presents how to work with static or relatively slow-changing energy prices. At the same time, it mentions, if you work with spot prices, which usually change on hourly basis, a slightly another approach is needed.
+
+> This new approach is applicable to slow-changing pricess too. It may be smart choice to start with that regarless.
+
 Here is a walk-through for users operating on spot.
 
 Let’s create all objects in dedicated schema: `ltss_energy_ote`. This way both methods of collecting data may exists being physically separated from each other.
@@ -228,10 +231,10 @@ Once we have a prices in the table we can visualize them.
 
 ![Grafana prices hourly](images/grafana-prices-ote.png)
 
-The query provided in previous article makes points fixed to 1-day period, which is not suitable for our new hourly prices. On the other hand chaning this period to 1-hour makes the query very slow (about 1.5s on rPi for 1 year of data).
+The query provided in previous article, in order to make the visualization nice, creates series of daily data points, which is not suitable for our hourly prices. Unfortunatelly adjusting this period to 1-hour makes the query to be very slow.
 
-Let's modify the query by generating time points only for slowly changing prices. It might be distribution and/or purchase prices. 
-Sale prices will be displayed without artificially generating data points since we expect that those data has periodic character anyway. 
+Let's modify the query by generating time points only for slow-changing prices. It might be distribution price and/or purchase prices.
+Sale prices will be displayed without artificially generating data points since we expect that those data has periodic character anyway.
 The result will be the UNION of two subqueries you have to put into Grafana:
 
 ```sql
@@ -250,6 +253,8 @@ AND cost_type = 'sale'
 
 ORDER BY time, cost_type, cost_kind
 ```
+
+Just to make an image of improvement. With previous approach the query would take about 1.5s on rPi for 1 year of data. After the change the execution takes about 30ms.
 
 ## Aggregates for Energy
 
@@ -357,3 +362,60 @@ CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_daily', '2025-01-
 ```
 
 > :exclamation: **Be aware** to not run `resfresh_continuous_aggregate()` on missing data while their aggregated form does exist in CAGGs. It would wipe them irreversibly out!
+
+## Presentation SQL queries
+
+The SQL queries remains basically the same. With exception, they don't make use of `calculate_cost()` function anymore. Instead they take ready to use prices.
+
+For example to draw chart of ROI buildup, we can get:
+* cost_sale for injected energy (obvious)
+* cost_purchase for purchased energy (obvious)
+* cost_purchase for consumed energy. 
+
+We are using purchase price for consumed energy because this `cost of consumption - cost of purchase` makes a cost of avoded purchase. 
+
+
+```sql
+WITH 
+src AS
+(
+    SELECT 
+    time_bucket_gapfill
+    (
+        '$query_granularity'::interval,      
+        "bucket", 'Europe/Prague'
+    ) AS timeb,
+    CASE WHEN entity_id ~ 'injected' THEN 'Injected'
+        WHEN entity_id ~ 'purchased' THEN 'Purchased'
+        WHEN entity_id ~ 'cube|mainhouse' THEN 'Consumption'
+        ELSE entity_id
+    END AS entityid2,
+    SUM(CASE
+            WHEN bucket < '2024-08-08' THEN 0 
+            ELSE CASE WHEN entity_id ~ 'injected' THEN cost_sale
+                        WHEN entity_id ~ 'purchased' THEN cost_purchase
+                        WHEN entity_id ~ 'cube|mainhouse' THEN cost_purchase
+                 END
+        END) AS value
+    FROM ltss_energy_ote.cagg_energy_${cagg_suffix}
+    WHERE entity_id  IN (
+                            'sensor.energy_injected_hourly', 
+                            'sensor.energy_purchased_hourly',
+                            'sensor.pg_mainhouse_total_energy_energy_hourly',
+                            'sensor.pg_cube_total_energy_energy_hourly'
+                        )
+    AND $__timeFilter("bucket") 
+    GROUP BY timeb, entityid2
+)
+SELECT
+    timeb,
+    entityid2,
+    SUM(value) OVER (
+        PARTITION BY entityid2
+        ORDER BY timeb::date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS value
+FROM src
+```
+
+![alt text](images/grafana-roi-evolution-ote.png)
