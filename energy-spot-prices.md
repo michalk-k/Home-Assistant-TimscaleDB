@@ -1,19 +1,58 @@
 ## Preface
-The previous part presents how to work with static or relatively slow-changing energy prices. At the same time, it mentions, if you work with spot prices, which usually change on hourly basis, a slightly another approach is needed.
 
-> This new approach is applicable to slow-changing pricess too. It may be smart choice to start with that regarless.
+The previous section explained how to work with static or relatively slow-changing energy prices. However, if you work with spot prices - which typically change hourly - a slightly different approach is required.
 
-Here is a walk-through for users operating on spot.
+> This new approach is also suitable for slow-changing prices. It may be a smart choice to start with it regardless.
 
-Let’s create all objects in dedicated schema: `ltss_energy_ote`. This way both methods of collecting data may exists being physically separated from each other.
-The OTE refers to spot prices operator in Czech Republic. You can chose whatever suffix you work for you. Here is an overview of objects to be created. 
+Here is a walk-through for users working with spot prices.
 
+Let’s create all objects in a dedicated schema: `ltss_energy_ote`. This way, both methods of collecting data can coexist while remaining physically separated. OTE refers to the spot prices operator in the Czech Republic, but you can choose any suffix that works for you. Here is an overview of the objects to be created:
+
+```mermaid
+flowchart BT
+
+    subgraph Postgresql fill:#f9f
+        
+        t_prices@{ shape: bow-rect, label: "electricity_prices" }
+        t_fees@{ shape: bow-rect, label: "electricity_fees" }
+
+        subgraph ltss
+            t_ltss@{ shape: bow-rect, label: "Table" }
+            tr_ltss@{ shape: rect, label: "Trigger" }
+        end
+
+        subgraph cagg_energy_hourly
+            v_hourly@{ shape: bow-rect, label: "View" }
+            p_hourly@{ shape: rect, label: "Scheduler" }
+        end
+
+        subgraph cagg_energy_daily
+            v_daily@{ shape: bow-rect, label: "View" }
+            p_daily@{ shape: rect, label: "Scheduler" }
+        end
+
+    end
+
+    subgraph HA
+        p_ltss@{ shape: rect, label: "LTSS Custom Integration" }
+    end
+
+    v_hourly-->p_daily
+    t_ltss-->p_hourly
+    t_prices-->p_hourly
+    t_fees-->p_hourly
+    tr_ltss-->t_prices
+    p_ltss-->t_ltss
+
+
+``` 
 
 ```mermaid
 classDiagram
-    ltss_energy_ote.electricity_cost <|-- public.ltss : tr_ltss_cost_ote()
+    ltss_energy_ote.electricity_prices <|-- public.ltss : tr_ltss_cost_ote()
     ltss_energy_ote.cagg_energy_hourly <|-- CAGG.ltss_energy_ote.cagg_energy_hourly
-    CAGG.ltss_energy_ote.cagg_energy_hourly <|-- ltss_energy_ote.electricity_cost 
+    CAGG.ltss_energy_ote.cagg_energy_hourly <|-- ltss_energy_ote.electricity_prices 
+    CAGG.ltss_energy_ote.cagg_energy_hourly <|-- ltss_energy_ote.electricity_fees 
     CAGG.ltss_energy_ote.cagg_energy_hourly <|-- public.ltss : tr_ltss_cagg_ote()
     ltss_energy_ote.cagg_energy_hourly --|> CAGG.ltss_energy_ote.cagg_energy_daily
 
@@ -29,19 +68,28 @@ classDiagram
     class CAGG.ltss_energy_ote.cagg_energy_hourly
     class CAGG.ltss_energy_ote.cagg_energy_daily
 
-    class ltss_energy_ote.electricity_cost{
-        TEXT cost_type
-        TEXT cost_kind
-        TSTZRANGE cost_period
+    class ltss_energy_ote.electricity_prices{
+        TEXT price_type
+        TEXT price_kind
+        TSTZRANGE price_period
         NUMERIC cost_price
-        TEXT cost_units
+        TEXT price_units
+    }
+    class ltss_energy_ote.electricity_fees{
+        TEXT price_type
+        TEXT price_kind
+        TSTZRANGE fee_period
+        NUMERIC fee_price
+        TEXT fee_units
     }
     class ltss_energy_ote.cagg_energy_hourly{
         TIMESTAMPTZ bucket
         TEXT entity_id
         NUMERIC value,
         NUMERIC cost_purchase,
-        NUMERIC cost_sale
+        NUMERIC cost_purchase_net,
+        NUMERIC cost_sale,
+        NUMERIC cost_sale_net
     }
 
     class ltss_energy_ote.cagg_energy_daily{
@@ -49,45 +97,67 @@ classDiagram
         TEXT entity_id
         NUMERIC value,
         NUMERIC cost_purchase,
-        NUMERIC cost_sale
+        NUMERIC cost_purchase_net,
+        NUMERIC cost_sale,
+        NUMERIC cost_sale_net
     }
 ```
 
-The idea looks pretty similar to the one described in the previous article. There are two major differences:
+The overall idea is very similar to what has been presented in the previous article. This introduces three key-changes:
 
-* we will calculate and store a prices (purchase and sale) together with energy
-* we will adjust the datatype that handles time range to one suitable for timestamps with time zone (TSTZRANGE)
+**Introducing handling fees**\
+Handling fees is something common while trading on spot with help of 3rd party (the operator). Two most common ways of billing are: fixed price for a energy unit and percentual value calculated from energy unit. These two are reflected in solution proposed below. Other scenarios might require respecive adjustements or different approach.
 
-Having prices already materialized in CAGGs helps with performance. For instance, rendering graphs doesn't require lookups to prices table. It's helpful especially when running on performance-limited hardware like RaspberyPi. 
+> Please note, that creating of hadling fees records has to be done manually, in advance. These are specific to contract, making their values automatic updates highly unlikely.
 
-The cons is, that changing prices for past period requires recalculation of CAGGs. No problem when having source data. Otherwise update must be performed directly to CAGGs data.
+**CAGGs will calculate and store energy costs alongside energy values.**\
+Having prices already materialized in CAGGs improves performance. For example, rendering graphs no longer requires lookups to the prices table. This is especially helpful when running on performance-limited hardware like a Raspberry Pi.
+We will store net prices as well as final ones (reduced by a handling fee). This leaves open door for potentially possible analytical tasks on those data.
+
+**change to time range datatype**
+Because spot prices change hourly, it's needed to use TSTZRANGE for storing validity period for each price. This datatype handles a timestamps with time zone.
+
 
 ## Prices
 
-Let's start with with new costs table:
+Let's start with the new costs table:
 
 ```sql
-CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_cost
+CREATE SCHEMA ltss_energy_ote;
+GRANT USAGE ON SCHEMA ltss_energy_ote TO public;
+
+CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_prices
 (
-    cost_type TEXT NOT NULL,
-    cost_kind TEXT NOT NULL,
-    cost_range TSTZRANGE NOT NULL,
-    cost_value NUMERIC NOT NULL,
-    cost_unit TEXT NOT NULL,
-    CONSTRAINT pk_electricitycost PRIMARY KEY (cost_type, cost_kind, cost_range),
-    CONSTRAINT xc_electricitycost_costrange EXCLUDE USING gist (cost_type WITH =, cost_kind WITH =, cost_range WITH &&)
+    price_type TEXT NOT NULL,
+    price_kind TEXT NOT NULL,
+    price_range TSTZRANGE NOT NULL,
+    price_value NUMERIC NOT NULL,
+    price_unit TEXT NOT NULL,
+    CONSTRAINT pk_electricitycost PRIMARY KEY (price_type, price_kind, price_range),
+    CONSTRAINT xc_electricitycost_costrange EXCLUDE USING gist (price_type WITH =, price_kind WITH =, price_range WITH &&)
+);
+
+CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees
+(
+    price_type TEXT NOT NULL,
+    price_kind TEXT NOT NULL,
+    fee_range TSTZRANGE NOT NULL,
+    fee_value NUMERIC NOT NULL,
+    fee_unit TEXT NOT NULL,
+    CONSTRAINT pk_electricityfees PRIMARY KEY (price_type, price_kind, fee_range),
+    CONSTRAINT xc_electricityfees_feerange EXCLUDE USING gist (price_type WITH =, price_kind WITH =, fee_range WITH &&)
 );
 ```
 
 The next step is to fill this table with data.
-Because new CAGGs will add prices to each aggregation, the source prices for a particular period must be already available in prices table at moment of CAGG execution.
+Because the new CAGGs will add prices to each aggregation, the source prices for a particular period must already be available in the prices table at the moment of CAGG execution.
 
-How to achieve it will depend strictly on the way of how the prices are collected by your HA instance. You can use HA custom integration is available, you can use NodeRed or even own script. The point is to make the prices land in the `electricity_cost` table.
+How you achieve this depends on how prices are collected by your Home Assistant (HA). You can use a custom HA integration, Node-RED, or even your own script. The key is to ensure the prices are inserted into the `electricity_prices` table.
 
-The simplest option is to have a sensor carrying the current price. Then publish this sensor via LTSS to the database, and then use a trigger to save its value to our table on every change. It will require the following trigger to create on ltss table:
+The simplest option is to have a sensor carrying the current price. Then, publish this sensor via LTSS to the database, and use a trigger to save its value to our table on every change. This requires the following trigger on the `ltss` table:
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_energy.tr_ltss_otaprices()
+CREATE OR REPLACE FUNCTION ltss_energy_ote.tr_ltss_oteprices()
     RETURNS trigger
     LANGUAGE 'plpgsql'
     SECURITY DEFINER
@@ -104,8 +174,8 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    INSERT INTO ltss_energy_ote.electricity_cost
-    (cost_type, cost_kind, cost_range, cost_value, cost_unit)
+    INSERT INTO ltss_energy_ote.electricity_prices
+    (price_type, price_kind, price_range, price_value, price_unit)
     VALUES
     ('sale', 'energy', tstzrange(EVENTTIME, EVENTTIME + '1h'::INTERVAL, '[)'), state::NUMERIC, 'kWh')
     ON CONFLICT DO NOTHING;
@@ -120,18 +190,18 @@ EXCEPTION WHEN others THEN
 END;
 $BODY$;
 
-CREATE OR REPLACE TRIGGER tr_ltss_otaprices
+CREATE OR REPLACE TRIGGER tr_ltss_oteprices
 AFTER INSERT
 ON public.ltss
 FOR EACH ROW
-EXECUTE FUNCTION ltss_energy.tr_ltss_otaprices();
+EXECUTE FUNCTION ltss_energy_ote.tr_ltss_oteprices();
 ```
 
-The trigger makes a range out of the "time" column. It assumes that the value is reported within a time period the value is valid for. This is a shortcoming: the import as to be reliable all the time, otherwise you might lost entries price (ie because of HA restart).
+The trigger creates a range from the "time" column. It assumes that the value is reported within the time period for which it is valid. This is a limitation: the import must be reliable at all times, or you might lose price entries (e.g., due to an HA restart).
 
-So let's try another approach. SPOT prices should be available in advance. I assume there ways how to get them to HA. Note, that exact solution strongly depends on how prices data are collected by HA. Different integrations might provide them in different way. But the common goal is to store those data into prices table.
+So let's try another approach. Spot prices should be available in advance. There are ways to get them into HA, but the exact solution depends on how your HA collects price data. Different integrations might provide them differently. The common goal is to store this data in the prices table.
 
-Let assume we have a `sensor.tomorrow_spot_electricity_prices` sensor, containing next day prices stored as json array in the entity `attributes`:
+Assume we have a `sensor.tomorrow_spot_electricity_prices` sensor, containing next day's prices stored as a JSON array in the entity's `attributes`:
 ```json
 "data": [
     {"time": "time1", "price": value1},
@@ -141,10 +211,10 @@ Let assume we have a `sensor.tomorrow_spot_electricity_prices` sensor, containin
 ]
 ```
 
-Here is an example of a trigger populating prices from sensor recorded in `ltss` table.
+Here is an example of a trigger that populates prices from a sensor recorded in the `ltss` table:
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_energy_ota.tr_ltss_otaprices()
+CREATE OR REPLACE FUNCTION ltss_energy_ote.tr_ltss_oteprices()
     RETURNS trigger
     LANGUAGE 'plpgsql'
     SECURITY DEFINER
@@ -162,13 +232,13 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    INSERT INTO ltss_energy_ote.electricity_cost
+    INSERT INTO ltss_energy_ote.electricity_prices
     (
-        cost_type,
-        cost_kind,
-        cost_range,
-        cost_value,
-        cost_unit
+        price_type,
+        price_kind,
+        price_range,
+        price_value,
+        price_unit
     )
     SELECT 
         'sale',
@@ -189,18 +259,18 @@ EXCEPTION WHEN others THEN
 END;
 $BODY$;
 
-CREATE OR REPLACE TRIGGER tr_ltss_otaprices
+CREATE OR REPLACE TRIGGER tr_ltss_oteprices
 AFTER INSERT
 ON public.ltss
 FOR EACH ROW
-EXECUTE FUNCTION ltss_energy.tr_ltss_otaprices();
+EXECUTE FUNCTION ltss_energy_ote.tr_ltss_oteprices();
 ```
 
-Notice that both implementations contains an error handling. While it is expensive in the Postgresql, it's intentionally left to ignore any error raised by this trigger. It prioritizes storing all data in `ltss` table over errors caused by these triggers. In any way, while it suppreses the error, it forwards information with error details to log as a warning.
+Notice that both implementations include error handling. While this is expensive in PostgreSQL, it is intentionally left in place to ignore any errors raised by this trigger. Storing all data in the `ltss` table is prioritized over errors caused by these triggers. While errors are suppressed, details are forwarded to the log as warnings.
 
 <details>
-<summary>For users of Czech Energy Spot Prices custom integration</summary>
-The `Czech Energy Spot Prices` provides a `sensor.tomorrow_spot_electricity_hour_order` sensor that has serious flaw: when prices are set to its attributes, the state is set to `none`. This makes LTSS ignoring it. Below, there is a template sensor, resolving this problem. Also it organizes data in more valid way, corresponding with the further part of the article.
+<summary>For users of the Czech Energy Spot Prices custom integration</summary>
+The `Czech Energy Spot Prices` integration provides a `sensor.tomorrow_spot_electricity_hour_order` sensor with a significant flaw: when prices are set in its attributes, the state is set to `none`. This causes LTSS to ignore it. Below is a template sensor that resolves this problem and organizes data in a way that matches the rest of this article.
 
 ```yaml
 template:
@@ -224,59 +294,69 @@ template:
 ```
 </details>
 
-## Prices visualization
-Once we have a prices in the table we can visualize them.
+## Prices Visualization
+
+Once we have prices in the table, we can visualize them.
 
 ![Grafana prices hourly](images/grafana-prices-ote.png)
 
-The query provided in previous article, in order to make the visualization nice, creates series of daily data points, which is not suitable for our hourly prices. Unfortunatelly adjusting this period to 1-hour makes the query to be very slow.
+The query provided in the previous article, which creates a series of daily data points for visualization, is not suitable for our hourly prices. Unfortunately, adjusting the period to 1 hour makes the query very slow.
 
-Let's modify the query by generating time points only for slow-changing prices. It might be distribution price and/or purchase prices.
-Sale prices will be displayed without artificially generating data points since we expect that those data has periodic character anyway.
-The result will be the UNION of two subqueries you have to put into Grafana:
+Let's modify the query to generate time points only for slow-changing prices, such as distribution or purchase prices. Sale prices will be displayed without artificially generating data points, since we expect them to have a periodic character. The result will be the UNION of two subqueries, which you can use in Grafana:
 
 ```sql
-SELECT time, cost_type, cost_kind, cost_value
-FROM ltss_energy_ote.electricity_cost AS ec
+SELECT time, price_type, price_kind, price_value
+FROM ltss_energy_ote.electricity_prices AS ec
 JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 day'::INTERVAL) AS x(time) ON TRUE
-WHERE x.time <@ cost_range
-  AND cost_type <> 'sale'
+WHERE x.time <@ price_range
+  AND price_type <> 'sale'
 
 UNION
 
-SELECT LOWER(cost_range) AS time, cost_type, cost_kind, cost_value
-FROM ltss_energy_ote.electricity_cost AS ec
-WHERE LOWER(cost_range) BETWEEN to_timestamp($__from/1000)::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
-  AND cost_type = 'sale'
+SELECT LOWER(price_range) AS time, price_type, price_kind, price_value
+FROM ltss_energy_ote.electricity_prices AS ec
+WHERE LOWER(price_range) BETWEEN to_timestamp($__from/1000)::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
+  AND price_type = 'sale'
 ```
 
-Just to make an image of improvement. With previous approach the query would take about 1.5s on rPi for 1 year of data. After the change the execution takes about 30ms.
+To illustrate the improvement: with the previous approach, the query would take about 1.5 seconds on a Raspberry Pi for 1 year of data. After this change, execution takes about 30 ms.
 
 ## Aggregates for Energy
 
-With prices ready to use, we can start with CAGGs. As mentioned at the article begining, we won't aggregate the energy only, but also calculate the partial prices for those aggregated energy periods. 
+With prices ready, we can start with CAGGs. As mentioned at the beginning of the article, we won't aggregate only the energy, but also calculate the partial prices for those aggregated energy periods.
 
-Before we jump into CAGGs, let’s create a `calculate_cost()` function that calculates a price of energy at given time. CAGGs will also make use of `get_entities_for_cagg_energy()` helper function, that enables calculation for selected entitites only.
+Before we create CAGGs, let’s create a `calculate_costs_arr()` function that calculates the price of energy at a given time. The function returns two values: net cost of energy and the cost reduced by handling fee(s). Both will be later materialized in CAGG.
+The function uses an ARRAY to return these two values to workaround limitations of CAGGs which disalow using subselects or CTEs within their definitions (at time this article is written). 
 
+The first-level CAGG will also use the `get_entities_for_cagg_energy()` helper function, which enables calculation for selected entities only.
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_cost
+CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_costs_arr
 (
-	_cost_type  TEXT,
+	_price_type TEXT,
 	_time       TIMESTAMPTZ,
 	_value      NUMERIC
 )
-RETURNS NUMERIC
-LANGUAGE 'sql'
-STABLE
-AS $f$
+RETURNS NUMERIC[]
+LANGUAGE 'sql' STABLE
+AS $BODY$
 
-   SELECT SUM(cost_value * _value)
-   FROM ltss_energy_ote.electricity_cost
-   WHERE _time <@ cost_range
-     AND cost_type = _cost_type
+    SELECT Array[SUM(sub.cost), SUM(sub.cost_net)]
+    FROM
+    (
+        SELECT
+            SUM(_value * (price_value - COALESCE(fee_value, 1))) AS cost,
+            SUM(price_value * _value)                            AS cost_net
+        FROM ltss_energy_ote.electricity_prices     AS ep
+        LEFT JOIN ltss_energy_ote.electricity_fees  AS ef
+                    ON (ep.price_type, ep.price_kind) = (ef.price_type, ef.price_kind)
+                    AND _time <@ ef.fee_range 
+        WHERE _time <@ ep.price_range
+          AND ep.price_type = _price_type
+    ) AS sub
 
-$f$;
+$BODY$;
+
 
 CREATE OR REPLACE FUNCTION ltss_energy_ote.get_entities_for_cagg_energy()
 RETURNS TEXT[]
@@ -286,7 +366,7 @@ AS $f$
 
    SELECT ARRAY
        [
-            -- replace sensor names with your ones.
+            -- replace sensor names with your own.
            'sensor.pg_mainhouse_total_energy_energy_hourly',
            'sensor.pg_cube_total_energy_energy_hourly',
            'sensor.energy_injected_hourly',
@@ -299,18 +379,20 @@ AS $f$
 $f$;
 ```
 
-Now we are ready to create hierarchical CAGGs. The hourly one aggregates data from the `ltss` table, providing sum of energy and its prices for the period. The second one just sums the hourly values into daily results:
+Now we are ready to create hierarchical CAGGs. The hourly one aggregates data from the `ltss` table, providing the hourly energy and its prices for that period. It has to call `calculate_costs_arr()` function four times which might seem to be suboptimal, but becasue of CAGGs limitations there is no other way.
+The second CAGG just sums the hourly values into daily results. 
 
 ```sql
--- create hourly CAGG based on ltss table
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
 WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague') AS bucket,
     entity_id,
-    delta(counter_agg("time", state::DOUBLE PRECISION)) AS value,
-    ltss_energy_ote.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC) AS cost_purchase,
-    ltss_energy_ote.calculate_cost('sale',     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC) AS cost_sale
+    delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS value,
+    (ltss_energy_ote.calculate_costs_arr('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[1] AS cost_purchase,
+	(ltss_energy_ote.calculate_costs_arr('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[2] AS cost_purchase_net,
+	(ltss_energy_ote.calculate_costs_arr('sale',     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[1] AS cost_sale,
+	(ltss_energy_ote.calculate_costs_arr('sale',     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[2] AS cost_sale_net
 FROM ltss
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
@@ -323,9 +405,11 @@ WITH (timescaledb.continuous) AS
 SELECT
    time_bucket('1d'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
    entity_id,
-   SUM(value)           AS value,
-   SUM(cost_purchase)   AS cost_purchase,
-   SUM(cost_sale)       AS cost_sale
+   SUM(value)               AS value,
+   SUM(cost_purchase)       AS cost_purchase,
+   SUM(cost_purchase_net)   AS cost_purchase_net,
+   SUM(cost_sale)           AS cost_sale
+   SUM(cost_sale_net)       AS cost_sale_net,
 FROM ltss_energy_ote.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
@@ -348,23 +432,23 @@ SELECT add_continuous_aggregate_policy
 );
 ```
 
-As learnt in the previous part, `WITH NO DATA` indicates that CAGGs are not filled with data at the moment of their creation. Once aggregate policies are created, they fills CAGGs with data coming to ltss.
+As explained in the previous part, `WITH NO DATA` means that CAGGs are not filled with data at creation. Once aggregate policies are created, they fill CAGGs with data coming into `ltss`.
 
-If you want to populate CAGGs with historical data available in ltss table, execute refresh procedures. Obviously hourly CAGG first, then daily one.
+If you want to populate CAGGs with historical data available in the `ltss` table, execute the refresh procedures - hourly CAGG first, then daily.
 
 ```sql
 CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_hourly', '2025-01-01 0:0', NOW()-'5h'::INTERVAL, TRUE);
 CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_daily', '2025-01-01 0:0', NOW()-'4d'::INTERVAL, TRUE);
 ```
 
-> :exclamation: **Be aware** to not run `resfresh_continuous_aggregate()` on missing data while their aggregated form does exist in CAGGs. It would wipe them irreversibly out!
+> :exclamation: **Be aware** not to run `refresh_continuous_aggregate()` on missing data if their aggregated form already exists in CAGGs. Doing so would irreversibly wipe them out!
 
-## Presentation SQL queries
+## Presentation SQL Queries
 
-The SQL queries remains basically the same. With exception, they don't make use of `calculate_cost()` function anymore. Instead they take ready to use prices from `cost_sale` and `cost_purchase` columns.
+The SQL queries remain basically the same, except they no longer use the `calculate_cost()` function. Instead, they use the ready-to-use prices from the `cost_sale` and `cost_purchase` columns.
 
-The easiest example is the ROI value. Bellow, there is an SQL query returning Return Of Investment.
-ROI is equal to sum of savings and sold energy. Savings comes from price of the consumed but not paid energy, thus from consumed energy reduced by purchased one. For savings we have to use purchase price.
+The simplest example is the ROI value. Below is an SQL query returning Return On Investment (ROI).
+ROI is equal to the sum of savings and sold energy. Savings come from the price of consumed but not purchased energy, i.e., from consumed energy reduced by purchased energy. For savings, we use the purchase price.
 
 ```sql
 SELECT 
@@ -387,10 +471,10 @@ WHERE bucket >= '2024-08-08'
                     )
 ```
 
-This use of partial costs will return in the rest of cost presenting graphs. 
-Worth to mention that we can do the math in Postgresql or in Grafana. The performance difference measured on database side is negligible. Because of that, this time I choose  fetching of least data by doing the match in database
+This use of partial costs will be repeated in the rest of the cost presentation graphs. 
+It's worth mentioning that we can do the math in PostgreSQL or in Grafana. The performance difference measured on the database side is negligible. Because of that, this time I chose to fetch the least data by doing the math in the database.
 
-The query bellow returns 2 values: Sold and Avoided. I use Transformations to get additional series, representing sum of both. 
+The query below returns two values: Sold and Avoided. I use Transformations to get an additional series representing the sum of both.
 
 ```sql
 WITH 
@@ -415,7 +499,7 @@ src AS
                     WHEN entity_id ~ 'cube|mainhouse' THEN cost_purchase
                  END
         END) AS value
-    FROM ltss_energy.cagg_energy_${cagg_suffix}
+    FROM ltss_energy_ote.cagg_energy_${cagg_suffix}
     WHERE entity_id IN (
                             'sensor.energy_injected_hourly', 
                             'sensor.energy_purchased_hourly',
