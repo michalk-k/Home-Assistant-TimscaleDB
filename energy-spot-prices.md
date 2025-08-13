@@ -92,7 +92,6 @@ CREATE OR REPLACE FUNCTION ltss_energy.tr_ltss_otaprices()
     LANGUAGE 'plpgsql'
     SECURITY DEFINER
 AS $BODY$
-
 DECLARE
     err_msg   TEXT;
     err_code  TEXT;
@@ -127,8 +126,6 @@ ON public.ltss
 FOR EACH ROW
 EXECUTE FUNCTION ltss_energy.tr_ltss_otaprices();
 ```
-
-Notice the implementation of error handling. It's important to ignore any error raised by this trigger, otherwise it would roll the transaction inserting data back.
 
 The trigger makes a range out of the "time" column. It assumes that the value is reported within a time period the value is valid for. This is a shortcoming: the import as to be reliable all the time, otherwise you might lost entries price (ie because of HA restart).
 
@@ -199,6 +196,7 @@ FOR EACH ROW
 EXECUTE FUNCTION ltss_energy.tr_ltss_otaprices();
 ```
 
+Notice that both implementations contains an error handling. While it is expensive in the Postgresql, it's intentionally left to ignore any error raised by this trigger. It prioritizes storing all data in `ltss` table over errors caused by these triggers. In any way, while it suppreses the error, it forwards information with error details to log as a warning.
 
 <details>
 <summary>For users of Czech Energy Spot Prices custom integration</summary>
@@ -239,19 +237,17 @@ The result will be the UNION of two subqueries you have to put into Grafana:
 
 ```sql
 SELECT time, cost_type, cost_kind, cost_value
-FROM electricity_cost AS ec
-JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 day'::interval) AS x(time) ON TRUE
-WHERE x.time::DATE <@ cost_range
-AND cost_type <> 'sale'
+FROM ltss_energy_ote.electricity_cost AS ec
+JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 day'::INTERVAL) AS x(time) ON TRUE
+WHERE x.time <@ cost_range
+  AND cost_type <> 'sale'
 
 UNION
 
 SELECT LOWER(cost_range) AS time, cost_type, cost_kind, cost_value
-FROM ltss_energy.electricity_cost_ote AS ec
-WHERE LOWER(cost_range) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
-AND cost_type = 'sale'
-
-ORDER BY time, cost_type, cost_kind
+FROM ltss_energy_ote.electricity_cost AS ec
+WHERE LOWER(cost_range) BETWEEN to_timestamp($__from/1000)::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
+  AND cost_type = 'sale'
 ```
 
 Just to make an image of improvement. With previous approach the query would take about 1.5s on rPi for 1 year of data. After the change the execution takes about 30ms.
@@ -365,15 +361,36 @@ CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_daily', '2025-01-
 
 ## Presentation SQL queries
 
-The SQL queries remains basically the same. With exception, they don't make use of `calculate_cost()` function anymore. Instead they take ready to use prices.
+The SQL queries remains basically the same. With exception, they don't make use of `calculate_cost()` function anymore. Instead they take ready to use prices from `cost_sale` and `cost_purchase` columns.
 
-For example to draw chart of ROI buildup, we can get:
-* cost_sale for injected energy (obvious)
-* cost_purchase for purchased energy (obvious)
-* cost_purchase for consumed energy. 
+The easiest example is the ROI value. Bellow, there is an SQL query returning Return Of Investment.
+ROI is equal to sum of savings and sold energy. Savings comes from price of the consumed but not paid energy, thus from consumed energy reduced by purchased one. For savings we have to use purchase price.
 
-We are using purchase price for consumed energy because this `cost of consumption - cost of purchase` makes a cost of avoded purchase. 
+```sql
+SELECT 
+    SUM
+    (
+        CASE
+            WHEN entity_id ~ 'injected'         THEN cost_sale
+            WHEN entity_id ~ 'purchased'        THEN -1 * cost_purchase
+            WHEN entity_id ~ 'cube|mainhouse'   THEN cost_purchase
+        END
+    ) AS value
+FROM ltss_energy_ote_cagg_energy_daily
+WHERE bucket >= '2024-08-08'
+  AND $__timeFilter("bucket")
+  AND entity_id  IN (
+                        'sensor.energy_injected_hourly', 
+                        'sensor.energy_purchased_hourly',
+                        'sensor.pg_mainhouse_total_energy_energy_hourly',
+                        'sensor.pg_cube_total_energy_energy_hourly'
+                    )
+```
 
+This use of partial costs will return in the rest of cost presenting graphs. 
+Worth to mention that we can do the math in Postgresql or in Grafana. The performance difference measured on database side is negligible. Because of that, this time I choose  fetching of least data by doing the match in database
+
+The query bellow returns 2 values: Sold and Avoided. I use Transformations to get additional series, representing sum of both. 
 
 ```sql
 WITH 
@@ -382,40 +399,37 @@ src AS
     SELECT 
     time_bucket_gapfill
     (
-        '$query_granularity'::interval,      
+        '$query_granularity'::INTERVAL,      
         "bucket", 'Europe/Prague'
-    ) AS timeb,
-    CASE WHEN entity_id ~ 'injected' THEN 'Injected'
-        WHEN entity_id ~ 'purchased' THEN 'Purchased'
-        WHEN entity_id ~ 'cube|mainhouse' THEN 'Consumption'
-        ELSE entity_id
-    END AS entityid2,
+    ) AS time,
+    CASE WHEN entity_id ~ 'injected'        THEN 'Sold'
+         WHEN entity_id ~ 'purchased'       THEN 'Avoided'
+         WHEN entity_id ~ 'cube|mainhouse'  THEN 'Avoided'
+         ELSE entity_id
+    END AS entityid,
     SUM(CASE
             WHEN bucket < '2024-08-08' THEN 0 
-            ELSE CASE WHEN entity_id ~ 'injected' THEN cost_sale
-                        WHEN entity_id ~ 'purchased' THEN cost_purchase
-                        WHEN entity_id ~ 'cube|mainhouse' THEN cost_purchase
+            ELSE CASE 
+                    WHEN entity_id ~ 'injected'       THEN cost_sale
+                    WHEN entity_id ~ 'purchased'      THEN -1 * cost_purchase
+                    WHEN entity_id ~ 'cube|mainhouse' THEN cost_purchase
                  END
         END) AS value
-    FROM ltss_energy_ote.cagg_energy_${cagg_suffix}
-    WHERE entity_id  IN (
+    FROM ltss_energy.cagg_energy_${cagg_suffix}
+    WHERE entity_id IN (
                             'sensor.energy_injected_hourly', 
                             'sensor.energy_purchased_hourly',
                             'sensor.pg_mainhouse_total_energy_energy_hourly',
                             'sensor.pg_cube_total_energy_energy_hourly'
                         )
-    AND $__timeFilter("bucket") 
-    GROUP BY timeb, entityid2
+    AND $__timeFilter("bucket")
+    GROUP BY 1, 2
 )
 SELECT
-    timeb,
-    entityid2,
-    SUM(value) OVER (
-        PARTITION BY entityid2
-        ORDER BY timeb::date
-        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS value
-FROM src
+    time,
+    entityid,
+    SUM(value) OVER (PARTITION BY entityid ORDER BY time) AS value
+FROM src;
 ```
 
 ![alt text](images/grafana-roi-evolution-ote.png)
