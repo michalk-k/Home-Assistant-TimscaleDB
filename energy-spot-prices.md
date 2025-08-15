@@ -6,17 +6,21 @@ The previous section explained how to work with static or relatively slow-changi
 
 Here is a walk-through for users working with spot prices.
 
-Let’s create all objects in a dedicated schema: `ltss_energy_ote`. This way, both methods of collecting data can coexist while remaining physically separated. OTE refers to the spot prices operator in the Czech Republic, but you can choose any suffix that works for you. Here is an overview of the objects to be created:
+Let’s create all objects in a dedicated schema: `ltss_energy_ote`. This way, both methods of collecting data can coexist while remaining physically separated. OTE refers to the spot prices operator in the Czech Republic, but you can choose any suffix that works for you.
+
+Here is an diagram showing involved components and created objects, and dataflow between them.
 
 ```mermaid
-flowchart BT
+flowchart LR
 
-    subgraph Postgresql fill:#f9f
-        
+    subgraph Postgresql
+        style Postgresql fill:transparent
+        style HA fill:transparent
+
         t_prices@{ shape: bow-rect, label: "electricity_prices" }
         t_fees@{ shape: bow-rect, label: "electricity_fees" }
 
-        subgraph ltss
+        subgraph public.ltss
             t_ltss@{ shape: bow-rect, label: "Table" }
             tr_ltss@{ shape: rect, label: "Trigger" }
         end
@@ -34,6 +38,7 @@ flowchart BT
     end
 
     subgraph HA
+        
         p_ltss@{ shape: rect, label: "LTSS Custom Integration" }
     end
 
@@ -43,76 +48,24 @@ flowchart BT
     t_fees-->p_hourly
     tr_ltss-->t_prices
     p_ltss-->t_ltss
+    p_hourly-->v_hourly
+    p_daily-->v_daily
+    t_ltss-->tr_ltss
 
 
 ``` 
 
-```mermaid
-classDiagram
-    ltss_energy_ote.electricity_prices <|-- public.ltss : tr_ltss_cost_ote()
-    ltss_energy_ote.cagg_energy_hourly <|-- CAGG.ltss_energy_ote.cagg_energy_hourly
-    CAGG.ltss_energy_ote.cagg_energy_hourly <|-- ltss_energy_ote.electricity_prices 
-    CAGG.ltss_energy_ote.cagg_energy_hourly <|-- ltss_energy_ote.electricity_fees 
-    CAGG.ltss_energy_ote.cagg_energy_hourly <|-- public.ltss : tr_ltss_cagg_ote()
-    ltss_energy_ote.cagg_energy_hourly --|> CAGG.ltss_energy_ote.cagg_energy_daily
-
-    ltss_energy_ote.cagg_energy_daily <|-- CAGG.ltss_energy_ote.cagg_energy_daily
-
-    class public.ltss{
-        TIMESTAMPTZ time
-        TEXT entity_id
-        TEXT state
-        tr_ltss_cost_ote()
-        tr_ltss_cagg_ote()
-    }
-    class CAGG.ltss_energy_ote.cagg_energy_hourly
-    class CAGG.ltss_energy_ote.cagg_energy_daily
-
-    class ltss_energy_ote.electricity_prices{
-        TEXT price_type
-        TEXT price_kind
-        TSTZRANGE price_period
-        NUMERIC cost_price
-        TEXT price_units
-    }
-    class ltss_energy_ote.electricity_fees{
-        TEXT price_type
-        TEXT price_kind
-        TSTZRANGE fee_period
-        NUMERIC fee_price
-        TEXT fee_units
-    }
-    class ltss_energy_ote.cagg_energy_hourly{
-        TIMESTAMPTZ bucket
-        TEXT entity_id
-        NUMERIC value,
-        NUMERIC cost_purchase,
-        NUMERIC cost_purchase_net,
-        NUMERIC cost_sale,
-        NUMERIC cost_sale_net
-    }
-
-    class ltss_energy_ote.cagg_energy_daily{
-        TIMESTAMPTZ bucket
-        TEXT entity_id
-        NUMERIC value,
-        NUMERIC cost_purchase,
-        NUMERIC cost_purchase_net,
-        NUMERIC cost_sale,
-        NUMERIC cost_sale_net
-    }
-```
 
 The overall idea is very similar to what has been presented in the previous article. This introduces three key-changes:
 
 **Introducing handling fees**\
-Handling fees is something common while trading on spot with help of 3rd party (the operator). Two most common ways of billing are: fixed price for a energy unit and percentual value calculated from energy unit. These two are reflected in solution proposed below. Other scenarios might require respecive adjustements or different approach.
+Handling fees is something common while trading on spot with help of 3rd party (the operator). Two most common ways of billing are: fixed price for a energy unit (ie 250CZK for every 1MWh) and percentual value calculated from energy unit (ie 15% off sold energy price). These two are reflected in solution proposed below. Other scenarios might require respecive adjustements or different approach.
 
-> Please note, that creating of hadling fees records has to be done manually, in advance. These are specific to contract, making their values automatic updates highly unlikely.
+> Please note, that hadling fees records have to be created manually, in advance to comming energy data. I assume they are contract-specific, making existence of some API to pull them highly unlikely.
 
 **CAGGs will calculate and store energy costs alongside energy values.**\
-Having prices already materialized in CAGGs improves performance. For example, rendering graphs no longer requires lookups to the prices table. This is especially helpful when running on performance-limited hardware like a Raspberry Pi.
-We will store net prices as well as final ones (reduced by a handling fee). This leaves open door for potentially possible analytical tasks on those data.
+Having costs already materialized in CAGGs improves performance. For example, rendering graphs no longer requires lookups to the prices table. This is especially helpful when running them on a performance-limited hardware like a Raspberry Pi.\
+My approach is to store net prices as well as gross ones (reduced by a handling fee). This leaves open door for potentially analytical tasks run on those data later.
 
 **change to time range datatype**
 Because spot prices change hourly, it's needed to use TSTZRANGE for storing validity period for each price. This datatype handles a timestamps with time zone.
@@ -120,7 +73,7 @@ Because spot prices change hourly, it's needed to use TSTZRANGE for storing vali
 
 ## Prices
 
-Let's start with the new costs table:
+Let's start with the new tables handling prices and fees:
 
 ```sql
 CREATE SCHEMA ltss_energy_ote;
@@ -149,57 +102,14 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees
 );
 ```
 
-The next step is to fill this table with data.
-Because the new CAGGs will add prices to each aggregation, the source prices for a particular period must already be available in the prices table at the moment of CAGG execution.
+The next step is to fill the tables with data.
+Because the new CAGGs will add costs to each aggregation, the prices and fees for a period must already be available in the respective table at the moment of CAGG execution. As mentioned before fees are to be set manually.
 
-How you achieve this depends on how prices are collected by your Home Assistant (HA). You can use a custom HA integration, Node-RED, or even your own script. The key is to ensure the prices are inserted into the `electricity_prices` table.
+How you approach feeding prices depends on how they are collected by your system. It might be custom HA integration, Node-RED, an external script or even manually provided prices with SQL queries (for rarelly changing prices). The key is to ensure the prices land in the `electricity_prices` table.
 
-The simplest option is to have a sensor carrying the current price. Then, publish this sensor via LTSS to the database, and use a trigger to save its value to our table on every change. This requires the following trigger on the `ltss` table:
+The simplest option could be a sensor carrying the current price. Then, publishing it via LTSS to the database. It has however as serious flaw: any - even short - outage of HA might result in missing prices and then zero costs for the period. In my opinion such an approach is not acceptable.
 
-```sql
-CREATE OR REPLACE FUNCTION ltss_energy_ote.tr_ltss_oteprices()
-    RETURNS trigger
-    LANGUAGE 'plpgsql'
-    SECURITY DEFINER
-AS $BODY$
-DECLARE
-    err_msg   TEXT;
-    err_code  TEXT;
-    EVENTTIME CONSTANT TIMESTAMPTZ = date_trunc('hour', NEW.time, 'Europe/Prague');
-    ENTITYID  CONSTANT TEXT = 'sensor.tomorrow_spot_electricity_prices';
-BEGIN
-    -- THIS TRIGGER FUNCTION IS USED on public.ltss table
-
-    IF NEW.entity_id <> ENTITYID THEN
-        RETURN NULL;
-    END IF;
-
-    INSERT INTO ltss_energy_ote.electricity_prices
-    (price_type, price_kind, price_range, price_value, price_unit)
-    VALUES
-    ('sale', 'energy', tstzrange(EVENTTIME, EVENTTIME + '1h'::INTERVAL, '[)'), state::NUMERIC, 'kWh')
-    ON CONFLICT DO NOTHING;
-
-    RETURN NULL;
-
-EXCEPTION WHEN others THEN
-    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT,
-                            err_code = RETURNED_SQLSTATE;
-    RAISE WARNING '[%], %', err_code, err_msg;
-    RETURN NULL;
-END;
-$BODY$;
-
-CREATE OR REPLACE TRIGGER tr_ltss_oteprices
-AFTER INSERT
-ON public.ltss
-FOR EACH ROW
-EXECUTE FUNCTION ltss_energy_ote.tr_ltss_oteprices();
-```
-
-The trigger creates a range from the "time" column. It assumes that the value is reported within the time period for which it is valid. This is a limitation: the import must be reliable at all times, or you might lose price entries (e.g., due to an HA restart).
-
-So let's try another approach. Spot prices should be available in advance. There are ways to get them into HA, but the exact solution depends on how your HA collects price data. Different integrations might provide them differently. The common goal is to store this data in the prices table.
+What works is storing prices in advace. The exact solution will vary from system to system, depending on prices provider API, and method of data processing. Even if processing is done by HA, the result will be diffrent from integration to integation. The common goal is to store this data in the prices table.
 
 Assume we have a `sensor.tomorrow_spot_electricity_prices` sensor, containing next day's prices stored as a JSON array in the entity's `attributes`:
 ```json
@@ -211,7 +121,7 @@ Assume we have a `sensor.tomorrow_spot_electricity_prices` sensor, containing ne
 ]
 ```
 
-Here is an example of a trigger that populates prices from a sensor recorded in the `ltss` table:
+Here is an example of a trigger that populates prices from such a sensor sensor published in the `ltss` table in out prices table.:
 
 ```sql
 CREATE OR REPLACE FUNCTION ltss_energy_ote.tr_ltss_oteprices()
@@ -266,7 +176,7 @@ FOR EACH ROW
 EXECUTE FUNCTION ltss_energy_ote.tr_ltss_oteprices();
 ```
 
-Notice that both implementations include error handling. While this is expensive in PostgreSQL, it is intentionally left in place to ignore any errors raised by this trigger. Storing all data in the `ltss` table is prioritized over errors caused by these triggers. While errors are suppressed, details are forwarded to the log as warnings.
+Notice error handling. By default every error rolls back the transation. In our case having complete data in `ltss` table is prioritized. When error is suppressed, its details are forwarded to the log as warnings.
 
 <details>
 <summary>For users of the Czech Energy Spot Prices custom integration</summary>
@@ -338,7 +248,8 @@ CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_costs_arr
 	_value      NUMERIC
 )
 RETURNS NUMERIC[]
-LANGUAGE 'sql' STABLE
+LANGUAGE 'sql'
+STABLE
 AS $BODY$
 
     SELECT Array[SUM(sub.cost), SUM(sub.cost_net)]
@@ -367,20 +278,23 @@ AS $f$
    SELECT ARRAY
        [
             -- replace sensor names with your own.
-           'sensor.pg_mainhouse_total_energy_energy_hourly',
-           'sensor.pg_cube_total_energy_energy_hourly',
-           'sensor.energy_injected_hourly',
-           'sensor.energy_purchased_hourly',
-           'sensor.wattsonic_pv1_input_energy_2_hourly',
-           'sensor.wattsonic_pv2_input_energy_2_hourly',
-           'sensor.energy_discharged_from_battery_hourly',
-           'sensor.energy_charged_to_battery_hourly'
+           'sensor.pg_mainhouse_total_energy_energy_hourly', -- consumption
+           'sensor.pg_cube_total_energy_energy_hourly',      -- consumption
+           'sensor.energy_injected_hourly',                  -- injected to grid
+           'sensor.energy_purchased_hourly',                 -- purchased from grid
+           'sensor.wattsonic_pv1_input_energy_2_hourly',     -- PV string 1 production
+           'sensor.wattsonic_pv2_input_energy_2_hourly',     -- PV string 2 production
+           'sensor.energy_discharged_from_battery_hourly',   -- Discharged from battery
+           'sensor.energy_charged_to_battery_hourly'         -- Charged to battery
        ];
 $f$;
 ```
 
-Now we are ready to create hierarchical CAGGs. The hourly one aggregates data from the `ltss` table, providing the hourly energy and its prices for that period. It has to call `calculate_costs_arr()` function four times which might seem to be suboptimal, but becasue of CAGGs limitations there is no other way.
-The second CAGG just sums the hourly values into daily results. 
+Finally we are ready to create hierarchical CAGGs. The hourly one aggregates data from the `ltss` table, providing the hourly energy and its costs for that period. Calling `calculate_costs_arr()` function two times with the same arguments seems suboptimal, but there is no other way due to CAGGs limitations.
+
+The second-level CAGG just sums the hourly values into daily results. 
+
+All CAGGs are set up as real-time ones, and get updating policy is set.
 
 ```sql
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
@@ -434,7 +348,7 @@ SELECT add_continuous_aggregate_policy
 
 As explained in the previous part, `WITH NO DATA` means that CAGGs are not filled with data at creation. Once aggregate policies are created, they fill CAGGs with data coming into `ltss`.
 
-If you want to populate CAGGs with historical data available in the `ltss` table, execute the refresh procedures - hourly CAGG first, then daily.
+If you want to populate CAGGs with historical data available in the `ltss` table, execute the refresh procedures - hourly CAGG first, then daily. Try to avoid ovelaping requested update time range with schedulled update interval. For example if the interval is `4h to 5m before NOW`, upper time boundary for the refresh should not exceed the NOW()-4h.
 
 ```sql
 CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_hourly', '2025-01-01 0:0', NOW()-'5h'::INTERVAL, TRUE);
@@ -461,7 +375,7 @@ SELECT
         END
     ) AS value
 FROM ltss_energy_ote_cagg_energy_daily
-WHERE bucket >= '2024-08-08'
+WHERE bucket >= '2024-08-08' -- FVE installation date
   AND $__timeFilter("bucket")
   AND entity_id  IN (
                         'sensor.energy_injected_hourly', 
@@ -492,7 +406,7 @@ src AS
          ELSE entity_id
     END AS entityid,
     SUM(CASE
-            WHEN bucket < '2024-08-08' THEN 0 
+            WHEN bucket < '2024-08-08' THEN 0 -- FVE installation date
             ELSE CASE 
                     WHEN entity_id ~ 'injected'       THEN cost_sale
                     WHEN entity_id ~ 'purchased'      THEN -1 * cost_purchase
