@@ -67,12 +67,10 @@ Materializing costs in CAGGs improves performance. For example, rendering graphs
 Since spot prices change hourly, we use the `TSTZRANGE` datatype to store the validity period for each price. This datatype handles timestamp ranges with time zones.
 
 ## Prices
-
-Let's start by creating the tables for prices and fees:
+Let's begin by creating the tables for prices and fees. The script below also sets basic privileges on the schema and tables, granting read access to all connected clients.
 
 ```sql
 CREATE SCHEMA ltss_energy_ote;
-GRANT USAGE ON SCHEMA ltss_energy_ote TO public;
 
 CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_prices
 (
@@ -93,8 +91,11 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees
     fee_value NUMERIC NOT NULL,
     fee_unit TEXT NOT NULL,
     CONSTRAINT pk_electricityfees PRIMARY KEY (price_type, price_kind, fee_range),
-    CONSTRAINT xc_electricityfees_feerange EXCLUDE USING gist (price_type WITH =, price_kind WITH =, fee_range WITH &&)
+    CONSTRAINT xc_electricityfees_feerange EXCLUDE USING gist (price_type WITH =, price_kind WITH =, fee_range WITH &&)    
 );
+
+GRANT USAGE ON SCHEMA ltss_energy_ote TO public;
+GRANT SELECT ON TABLE ltss_energy_ote.electricity_fees, ltss_energy_ote.electricity_prices TO public;
 ```
 
 Next, populate these tables with data. Since the new CAGGs will add costs to each aggregation, prices and fees for a period must be present in their respective tables before the CAGG runs. As mentioned, fees are set manually.
@@ -132,9 +133,8 @@ DECLARE
 BEGIN
     -- THIS TRIGGER FUNCTION IS USED on public.ltss table
 
-    IF NEW.entity_id <> ENTITYID
-    THEN
-        RETURN NEW;
+    IF NEW.entity_id <> ENTITYID THEN
+        RETURN NULL;
     END IF;
 
     INSERT INTO ltss_energy_ote.electricity_prices
@@ -152,17 +152,18 @@ BEGIN
         (j->'price')::NUMERIC,
         'kWh'
     FROM jsonb_array_elements(NEW.attributes->'data') AS j
-    ON CONFLICT ON CONSTRAINT pk_electricitycost DO UPDATE
+    ON CONFLICT ON CONSTRAINT pk_electricitycost 
+    DO UPDATE
     SET price_value = EXCLUDED.price_value
     WHERE price_value <> EXCLUDED.price_value;
 
-    RETURN NEW;
+    RETURN NULL;
 
 EXCEPTION WHEN others THEN
-    GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT,
+    GET STACKED DIAGNOSTICS err_msg  = MESSAGE_TEXT,
                             err_code = RETURNED_SQLSTATE;
     RAISE WARNING '[%], %', err_code, err_msg;
-    RETURN NEW;
+    RETURN NULL;
 END;
 $BODY$;
 
@@ -231,7 +232,7 @@ This change reduces query time from about 1.5 seconds (for a year of data on a R
 
 ## Aggregates for Energy
 
-With prices ready, we can create CAGGs. As mentioned earlier, we will aggregate both energy and the corresponding costs.
+With prices ready, we can finally start creating Continuous Aggregates. As mentioned earlier, we will aggregate both energy and the corresponding costs.
 
 Before creating CAGGs, define a `calculate_costs_arr()` function to calculate the energy price at a given time. This function returns two values: the net energy cost and the cost after deducting handling fees. Both will be materialized in the CAGG. The function uses an array to return these values, working around CAGG limitations that prevent subselects or CTEs.
 
@@ -291,8 +292,6 @@ Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the `ltss` 
 
 The daily CAGG simply sums the hourly values.
 
-Finally all CAGGs are set as real-time, and an refresh policy is applied.
-
 ```sql
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
 WITH (timescaledb.continuous) AS
@@ -325,6 +324,8 @@ FROM ltss_energy_ote.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
 
+GRANT SELECT ON TABLE ltss_energy_ote.cagg_energy_hourly, ltss_energy_ote.cagg_energy_daily TO public;
+
 -- make both CAGGs real-time
 ALTER MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
 SET (timescaledb.materialized_only = FALSE);
@@ -342,6 +343,8 @@ SELECT add_continuous_aggregate_policy
    'ltss_energy_ote.cagg_energy_daily', '3d'::INTERVAL, '4h'::INTERVAL, '12h'::INTERVAL
 );
 ```
+
+At this point, all CAGGs are configured for real-time updates, automatic refresh policies are in place, and essential access privileges have been granted.
 
 As explained previously, `WITH NO DATA` means CAGGs are not filled at creation. Once aggregate policies are set, they fill CAGGs with new data from `ltss` table.
 
