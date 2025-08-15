@@ -109,9 +109,9 @@ Assume you have a `sensor.tomorrow_spot_electricity_prices` sensor, containing t
 
 ```json
 "data": [
-    {"time": "time1", "price": value1},
-    {"time": "time2", "price": value2},
-    {"time": "time3", "price": value3}
+    {"time": "time1", "price": 1.0},
+    {"time": "time2", "price": 2.0},
+    {"time": "time3", "price": 3.0}
     ...
 ]
 ```
@@ -152,7 +152,9 @@ BEGIN
         (j->'price')::NUMERIC,
         'kWh'
     FROM jsonb_array_elements(NEW.attributes->'data') AS j
-    ON CONFLICT DO NOTHING;
+    ON CONFLICT ON CONSTRAINT pk_electricitycost DO UPDATE
+    SET price_value = EXCLUDED.price_value
+    WHERE price_value <> EXCLUDED.price_value;
 
     RETURN NEW;
 
@@ -207,7 +209,8 @@ Once prices are in the table, you can visualize them.
 
 The query from the previous article, which generates daily data points for visualization, is not suitable for hourly prices. Adjusting the period to 1 hour makes the query very slow.
 
-Instead, modify the query to generate time points only for slow-changing prices (like distribution or purchase prices). Spot sale prices are displayed as-is, since they are periodic. The result is a UNION of two subqueries, suitable for Grafana:
+Instead, execute the query to generate time points only for slow-changing prices (like distribution prices). In our example spot sale prices are displayed as-is, since they are periodic. Purchasing on spot, requires slight change to the conditions.
+The result is a UNION of two subqueries:
 
 ```sql
 SELECT time, price_type, price_kind, price_value
@@ -288,7 +291,7 @@ Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the `ltss` 
 
 The daily CAGG simply sums the hourly values.
 
-All CAGGs are set as real-time, and an update policy is applied.
+Finally all CAGGs are set as real-time, and an refresh policy is applied.
 
 ```sql
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
@@ -340,7 +343,7 @@ SELECT add_continuous_aggregate_policy
 );
 ```
 
-As explained previously, `WITH NO DATA` means CAGGs are not filled at creation. Once aggregate policies are set, they fill CAGGs with new data from `ltss`.
+As explained previously, `WITH NO DATA` means CAGGs are not filled at creation. Once aggregate policies are set, they fill CAGGs with new data from `ltss` table.
 
 To populate CAGGs with historical data from the `ltss` table, run the refresh procedures—hourly first, then daily. Avoid overlapping the requested update time range with the scheduled update interval. For example, if the interval is `4h to 5m before NOW`, the upper time boundary for the refresh should not exceed NOW()-4h.
 
