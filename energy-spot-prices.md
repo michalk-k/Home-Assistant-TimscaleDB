@@ -1,14 +1,14 @@
 ## Preface
 
-The previous section explained how to work with static or relatively slow-changing energy prices. However, if you work with spot prices - which typically change hourly - a slightly different approach is required.
+The previous section described how to work with static or slow-changing energy prices. However, spot prices—typically updated hourly—require a slightly different approach.
 
-> This new approach is also suitable for slow-changing prices. It may be a smart choice to start with it regardless.
+> This new method also works well for slow-changing prices. It may be wise to use it from the start.
 
-Here is a walk-through for users working with spot prices.
+This guide walks you through handling spot prices.
 
-Let’s create all objects in a dedicated schema: `ltss_energy_ote`. This way, both methods of collecting data can coexist while remaining physically separated. OTE refers to the spot prices operator in the Czech Republic, but you can choose any suffix that works for you.
+We'll create all objects in a dedicated schema: `ltss_energy_ote`. This allows both data collection methods to coexist while remaining physically separated. OTE refers to the spot price operator in the Czech Republic, but you can use any suffix you prefer.
 
-Here is an diagram showing involved components and created objects, and dataflow between them.
+Below is a diagram showing the involved components, created objects, and data flow.
 
 ```mermaid
 flowchart LR
@@ -51,29 +51,24 @@ flowchart LR
     p_hourly-->v_hourly
     p_daily-->v_daily
     t_ltss-->tr_ltss
+```
 
+The overall concept is similar to the previous article, but with three key changes:
 
-``` 
+**1. Handling Fees**  
+Handling fees are common when trading on the spot market via a third party (the operator). The two most common billing methods are: a fixed price per energy unit (e.g., 250 CZK per 1 MWh) and a percentage of the energy price (e.g., 15% of the sold energy price). The solution below supports both. Other scenarios may require adjustments.
 
+> Note: Handling fee records must be created manually, in advance of incoming energy data. They are usually contract-specific, so an API for automatic retrieval is unlikely.
 
-The overall idea is very similar to what has been presented in the previous article. This introduces three key-changes:
+**2. CAGGs Calculate and Store Energy Costs**  
+Materializing costs in CAGGs improves performance. For example, rendering graphs no longer requires lookups to the prices table, which is especially helpful on resource-constrained hardware like a Raspberry Pi. Both net and gross prices (after deducting handling fees) are stored, enabling future analysis.
 
-**Introducing handling fees**\
-Handling fees is something common while trading on spot with help of 3rd party (the operator). Two most common ways of billing are: fixed price for a energy unit (ie 250CZK for every 1MWh) and percentual value calculated from energy unit (ie 15% off sold energy price). These two are reflected in solution proposed below. Other scenarios might require respecive adjustements or different approach.
-
-> Please note, that hadling fees records have to be created manually, in advance to comming energy data. I assume they are contract-specific, making existence of some API to pull them highly unlikely.
-
-**CAGGs will calculate and store energy costs alongside energy values.**\
-Having costs already materialized in CAGGs improves performance. For example, rendering graphs no longer requires lookups to the prices table. This is especially helpful when running them on a performance-limited hardware like a Raspberry Pi.\
-My approach is to store net prices as well as gross ones (reduced by a handling fee). This leaves open door for potentially analytical tasks run on those data later.
-
-**change to time range datatype**
-Because spot prices change hourly, it's needed to use TSTZRANGE for storing validity period for each price. This datatype handles a timestamps with time zone.
-
+**3. Use of Time Range Datatype**  
+Since spot prices change hourly, we use the `TSTZRANGE` datatype to store the validity period for each price. This datatype handles timestamp ranges with time zones.
 
 ## Prices
 
-Let's start with the new tables handling prices and fees:
+Let's start by creating the tables for prices and fees:
 
 ```sql
 CREATE SCHEMA ltss_energy_ote;
@@ -102,16 +97,16 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees
 );
 ```
 
-The next step is to fill the tables with data.
-Because the new CAGGs will add costs to each aggregation, the prices and fees for a period must already be available in the respective table at the moment of CAGG execution. As mentioned before fees are to be set manually.
+Next, populate these tables with data. Since the new CAGGs will add costs to each aggregation, prices and fees for a period must be present in their respective tables before the CAGG runs. As mentioned, fees are set manually.
 
-How you approach feeding prices depends on how they are collected by your system. It might be custom HA integration, Node-RED, an external script or even manually provided prices with SQL queries (for rarelly changing prices). The key is to ensure the prices land in the `electricity_prices` table.
+How you feed prices depends on your system. It could be a custom HA integration, Node-RED, an external script, or even manual SQL queries for rarely changing prices. The key is to ensure prices are inserted into the `electricity_prices` table.
 
-The simplest option could be a sensor carrying the current price. Then, publishing it via LTSS to the database. It has however as serious flaw: any - even short - outage of HA might result in missing prices and then zero costs for the period. In my opinion such an approach is not acceptable.
+A simple option is to use a sensor that provides the current price and publish it via LTSS to the database. However, this approach has a major flaw: any outage in HA can result in missing prices and zero costs for that period, which is unacceptable.
 
-What works is storing prices in advace. The exact solution will vary from system to system, depending on prices provider API, and method of data processing. Even if processing is done by HA, the result will be diffrent from integration to integation. The common goal is to store this data in the prices table.
+A better approach is to store prices in advance. The exact solution will depend on your price provider's API and your data processing method. Even if processing is done by HA, the result will differ between integrations. The common goal is to store this data in the prices table.
 
-Assume we have a `sensor.tomorrow_spot_electricity_prices` sensor, containing next day's prices stored as a JSON array in the entity's `attributes`:
+Assume you have a `sensor.tomorrow_spot_electricity_prices` sensor, containing the next day's prices as a JSON array in the entity's `attributes`:
+
 ```json
 "data": [
     {"time": "time1", "price": value1},
@@ -121,7 +116,7 @@ Assume we have a `sensor.tomorrow_spot_electricity_prices` sensor, containing ne
 ]
 ```
 
-Here is an example of a trigger that populates prices from such a sensor sensor published in the `ltss` table in out prices table.:
+Here is an example trigger that populates prices from such a sensor, published in the `ltss` table, into the prices table:
 
 ```sql
 CREATE OR REPLACE FUNCTION ltss_energy_ote.tr_ltss_oteprices()
@@ -176,11 +171,11 @@ FOR EACH ROW
 EXECUTE FUNCTION ltss_energy_ote.tr_ltss_oteprices();
 ```
 
-Notice error handling. By default every error rolls back the transation. In our case having complete data in `ltss` table is prioritized. When error is suppressed, its details are forwarded to the log as warnings.
+Note the error handling: by default, any error rolls back the transaction. Here, we prioritize having complete data in the `ltss` table. Errors are suppressed and logged as warnings.
 
 <details>
 <summary>For users of the Czech Energy Spot Prices custom integration</summary>
-The `Czech Energy Spot Prices` integration provides a `sensor.tomorrow_spot_electricity_hour_order` sensor with a significant flaw: when prices are set in its attributes, the state is set to `none`. This causes LTSS to ignore it. Below is a template sensor that resolves this problem and organizes data in a way that matches the rest of this article.
+The `Czech Energy Spot Prices` integration provides a `sensor.tomorrow_spot_electricity_hour_order` sensor with a significant flaw: when prices are set in its attributes, the state is set to `none`, causing LTSS to ignore it. Below is a template sensor that resolves this and structures the data as required:
 
 ```yaml
 template:
@@ -204,15 +199,15 @@ template:
 ```
 </details>
 
-## Prices Visualization
+## Price Visualization
 
-Once we have prices in the table, we can visualize them.
+Once prices are in the table, you can visualize them.
 
 ![Grafana prices hourly](images/grafana-prices-ote.png)
 
-The query provided in the previous article, which creates a series of daily data points for visualization, is not suitable for our hourly prices. Unfortunately, adjusting the period to 1 hour makes the query very slow.
+The query from the previous article, which generates daily data points for visualization, is not suitable for hourly prices. Adjusting the period to 1 hour makes the query very slow.
 
-Let's modify the query to generate time points only for slow-changing prices, such as distribution or purchase prices. Sale prices will be displayed without artificially generating data points, since we expect them to have a periodic character. The result will be the UNION of two subqueries, which you can use in Grafana:
+Instead, modify the query to generate time points only for slow-changing prices (like distribution or purchase prices). Spot sale prices are displayed as-is, since they are periodic. The result is a UNION of two subqueries, suitable for Grafana:
 
 ```sql
 SELECT time, price_type, price_kind, price_value
@@ -229,23 +224,22 @@ WHERE LOWER(price_range) BETWEEN to_timestamp($__from/1000)::TIMESTAMPTZ AND to_
   AND price_type = 'sale'
 ```
 
-To illustrate the improvement: with the previous approach, the query would take about 1.5 seconds on a Raspberry Pi for 1 year of data. After this change, execution takes about 30 ms.
+This change reduces query time from about 1.5 seconds (for a year of data on a Raspberry Pi) to about 30 ms.
 
 ## Aggregates for Energy
 
-With prices ready, we can start with CAGGs. As mentioned at the beginning of the article, we won't aggregate only the energy, but also calculate the partial prices for those aggregated energy periods.
+With prices ready, we can create CAGGs. As mentioned earlier, we will aggregate both energy and the corresponding costs.
 
-Before we create CAGGs, let’s create a `calculate_costs_arr()` function that calculates the price of energy at a given time. The function returns two values: net cost of energy and the cost reduced by handling fee(s). Both will be later materialized in CAGG.
-The function uses an ARRAY to return these two values to workaround limitations of CAGGs which disalow using subselects or CTEs within their definitions (at time this article is written). 
+Before creating CAGGs, define a `calculate_costs_arr()` function to calculate the energy price at a given time. This function returns two values: the net energy cost and the cost after deducting handling fees. Both will be materialized in the CAGG. The function uses an array to return these values, working around CAGG limitations that prevent subselects or CTEs.
 
-The first-level CAGG will also use the `get_entities_for_cagg_energy()` helper function, which enables calculation for selected entities only.
+The first-level CAGG also uses the `get_entities_for_cagg_energy()` helper function to select which entities to aggregate.
 
 ```sql
 CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_costs_arr
 (
-	_price_type TEXT,
-	_time       TIMESTAMPTZ,
-	_value      NUMERIC
+    _price_type TEXT,
+    _time       TIMESTAMPTZ,
+    _value      NUMERIC
 )
 RETURNS NUMERIC[]
 LANGUAGE 'sql'
@@ -290,11 +284,11 @@ AS $f$
 $f$;
 ```
 
-Finally we are ready to create hierarchical CAGGs. The hourly one aggregates data from the `ltss` table, providing the hourly energy and its costs for that period. Calling `calculate_costs_arr()` function two times with the same arguments seems suboptimal, but there is no other way due to CAGGs limitations.
+Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the `ltss` table, providing hourly energy and costs. Although calling `calculate_costs_arr()` twice with the same arguments is not ideal, it's necessary due to CAGG limitations.
 
-The second-level CAGG just sums the hourly values into daily results. 
+The daily CAGG simply sums the hourly values.
 
-All CAGGs are set up as real-time ones, and get updating policy is set.
+All CAGGs are set as real-time, and an update policy is applied.
 
 ```sql
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
@@ -304,9 +298,9 @@ SELECT
     entity_id,
     delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS value,
     (ltss_energy_ote.calculate_costs_arr('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[1] AS cost_purchase,
-	(ltss_energy_ote.calculate_costs_arr('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[2] AS cost_purchase_net,
-	(ltss_energy_ote.calculate_costs_arr('sale',     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[1] AS cost_sale,
-	(ltss_energy_ote.calculate_costs_arr('sale',     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[2] AS cost_sale_net
+    (ltss_energy_ote.calculate_costs_arr('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[2] AS cost_purchase_net,
+    (ltss_energy_ote.calculate_costs_arr('sale',     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[1] AS cost_sale,
+    (ltss_energy_ote.calculate_costs_arr('sale',     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[2] AS cost_sale_net
 FROM ltss
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
@@ -322,8 +316,8 @@ SELECT
    SUM(value)               AS value,
    SUM(cost_purchase)       AS cost_purchase,
    SUM(cost_purchase_net)   AS cost_purchase_net,
-   SUM(cost_sale)           AS cost_sale
-   SUM(cost_sale_net)       AS cost_sale_net,
+   SUM(cost_sale)           AS cost_sale,
+   SUM(cost_sale_net)       AS cost_sale_net
 FROM ltss_energy_ote.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
@@ -346,23 +340,22 @@ SELECT add_continuous_aggregate_policy
 );
 ```
 
-As explained in the previous part, `WITH NO DATA` means that CAGGs are not filled with data at creation. Once aggregate policies are created, they fill CAGGs with data coming into `ltss`.
+As explained previously, `WITH NO DATA` means CAGGs are not filled at creation. Once aggregate policies are set, they fill CAGGs with new data from `ltss`.
 
-If you want to populate CAGGs with historical data available in the `ltss` table, execute the refresh procedures - hourly CAGG first, then daily. Try to avoid ovelaping requested update time range with schedulled update interval. For example if the interval is `4h to 5m before NOW`, upper time boundary for the refresh should not exceed the NOW()-4h.
+To populate CAGGs with historical data from the `ltss` table, run the refresh procedures—hourly first, then daily. Avoid overlapping the requested update time range with the scheduled update interval. For example, if the interval is `4h to 5m before NOW`, the upper time boundary for the refresh should not exceed NOW()-4h.
 
 ```sql
 CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_hourly', '2025-01-01 0:0', NOW()-'5h'::INTERVAL, TRUE);
 CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_daily', '2025-01-01 0:0', NOW()-'4d'::INTERVAL, TRUE);
 ```
 
-> :exclamation: **Be aware** not to run `refresh_continuous_aggregate()` on missing data if their aggregated form already exists in CAGGs. Doing so would irreversibly wipe them out!
+> :exclamation: **Important:** Do not run `refresh_continuous_aggregate()` on missing data if their aggregated form already exists in CAGGs. Doing so will irreversibly delete them!
 
 ## Presentation SQL Queries
 
-The SQL queries remain basically the same, except they no longer use the `calculate_cost()` function. Instead, they use the ready-to-use prices from the `cost_sale` and `cost_purchase` columns.
+The SQL queries remain largely the same, but now use the precomputed `cost_sale` and `cost_purchase` columns instead of the `calculate_cost()` function.
 
-The simplest example is the ROI value. Below is an SQL query returning Return On Investment (ROI).
-ROI is equal to the sum of savings and sold energy. Savings come from the price of consumed but not purchased energy, i.e., from consumed energy reduced by purchased energy. For savings, we use the purchase price.
+For example, the following SQL query returns Return On Investment (ROI). ROI is the sum of savings and sold energy. Savings are calculated as the price of consumed but not purchased energy (i.e., consumed energy minus purchased energy), using the purchase price.
 
 ```sql
 SELECT 
@@ -385,10 +378,10 @@ WHERE bucket >= '2024-08-08' -- FVE installation date
                     )
 ```
 
-This use of partial costs will be repeated in the rest of the cost presentation graphs. 
-It's worth mentioning that we can do the math in PostgreSQL or in Grafana. The performance difference measured on the database side is negligible. Because of that, this time I chose to fetch the least data by doing the math in the database.
+This approach to partial costs is used throughout the cost presentation graphs.  
+You can perform calculations in PostgreSQL or Grafana; the performance difference is negligible. Here, we fetch the minimal data by doing the math in the database.
 
-The query below returns two values: Sold and Avoided. I use Transformations to get an additional series representing the sum of both.
+The query below returns two values: Sold and Avoided. Use Grafana Transformations to create an additional series representing their sum.
 
 ```sql
 WITH 
@@ -431,3 +424,4 @@ FROM src;
 ```
 
 ![alt text](images/grafana-roi-evolution-ote.png)
+
