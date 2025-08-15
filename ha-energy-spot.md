@@ -208,10 +208,13 @@ Once prices are in the table, you can visualize them.
 
 ![Grafana prices hourly](images/grafana-prices-ote.png)
 
-The query from the previous article, which generates daily data points for visualization, is not suitable for hourly prices. Adjusting the period to 1 hour makes the query very slow.
+The query from the previous article, which generates daily data points for visualization, is not suitable for hourly prices. At the same time adjusting the period to 1 hour makes the query very slow.
 
-Instead, execute the query to generate time points only for slow-changing prices (like distribution prices). In our example spot sale prices are displayed as-is, since they are periodic. Purchasing on spot, requires slight change to the conditions.
-The result is a UNION of two subqueries:
+We can however join both queries using UNION: 
+* generate datapoints for slow-changing prices (like distribution prices) and . 
+* list spot sale prices as recorded, since they are periodic anyway. 
+
+The result is:
 
 ```sql
 SELECT time, price_type, price_kind, price_value
@@ -230,11 +233,13 @@ WHERE LOWER(price_range) BETWEEN to_timestamp($__from/1000)::TIMESTAMPTZ AND to_
 
 This change reduces query time from about 1.5 seconds (for a year of data on a Raspberry Pi) to about 30 ms.
 
+Note, purchasing on spot requires slight change to the conditions.
+
 ## Aggregates for Energy
 
 With prices ready, we can finally start creating Continuous Aggregates. As mentioned earlier, we will aggregate both energy and the corresponding costs.
 
-Before creating CAGGs, define a `calculate_costs_arr()` function to calculate the energy price at a given time. This function returns two values: the net energy cost and the cost after deducting handling fees. Both will be materialized in the CAGG. The function uses an array to return these values, working around CAGG limitations that prevent subselects or CTEs.
+We will need a `calculate_costs_arr()` function to turn the enregy into price at a given time. This function returns two values: the cost after deducting handling fees and the net cost. Both will be materialized in the CAGG. The function uses an array to return these values, working around CAGG limitations that prevent subselects or CTEs.
 
 The first-level CAGG also uses the `get_entities_for_cagg_energy()` helper function to select which entities to aggregate.
 
@@ -288,7 +293,7 @@ AS $f$
 $f$;
 ```
 
-Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the `ltss` table, providing hourly energy and costs. Although calling `calculate_costs_arr()` twice with the same arguments is not ideal, it's necessary due to CAGG limitations.
+Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the `ltss` table, providing hourly energy and its costs. Although calling `calculate_costs_arr()` twice with the same arguments is not ideal, it's necessary to overcome CAGG limitations.
 
 The daily CAGG simply sums the hourly values.
 
@@ -324,6 +329,7 @@ FROM ltss_energy_ote.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
 
+-- Grant read access to everyone connected
 GRANT SELECT ON TABLE ltss_energy_ote.cagg_energy_hourly, ltss_energy_ote.cagg_energy_daily TO public;
 
 -- make both CAGGs real-time
