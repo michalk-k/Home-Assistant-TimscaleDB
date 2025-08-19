@@ -69,6 +69,7 @@ Since spot prices change hourly, we use the `TSTZRANGE` datatype to store the va
 ## Prices
 Let's begin by creating the tables for prices and fees. The script below also sets basic privileges on the schema and tables, granting read access to all connected clients.
 
+
 ```sql
 CREATE SCHEMA ltss_energy_ote;
 
@@ -86,17 +87,44 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_prices
 CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees
 (
     price_type TEXT NOT NULL,
-    price_kind TEXT NOT NULL,
+    fee_kind TEXT NOT NULL,
     fee_range TSTZRANGE NOT NULL,
     fee_value NUMERIC NOT NULL,
+	fee_is_perc BOOLEAN,
     fee_unit TEXT NOT NULL,
-    CONSTRAINT pk_electricityfees PRIMARY KEY (price_type, price_kind, fee_range),
-    CONSTRAINT xc_electricityfees_feerange EXCLUDE USING gist (price_type WITH =, price_kind WITH =, fee_range WITH &&)    
+    CONSTRAINT pk_electricityfees PRIMARY KEY (price_type, fee_kind, fee_range, fee_is_perc),
+    CONSTRAINT xc_electricityfees_feerange EXCLUDE USING gist (price_type WITH =, fee_kind WITH =, fee_is_perc WITH =, fee_range WITH &&)    
 );
 
 GRANT USAGE ON SCHEMA ltss_energy_ote TO public;
 GRANT SELECT ON TABLE ltss_energy_ote.electricity_fees, ltss_energy_ote.electricity_prices TO public;
 ```
+
+The `electricity_prices` table has been discussed and this part adds nothing but change of the schema.
+
+The `electricity_fees` though, deserves some attention.\
+It provides ability to setup fees for 'sale' and 'purchase'. While it's not mandatory to use exactly those words, it's important to use the same naming for both: prices and fee tables. 
+
+The 'fee' table allows to store multiple fees stacking for particular time, for example tax, buying operator handling fee, distribution network fee and more. Some of them can be calculated into final, single price. But it makes impossible to maintain them separatelly for different time perios (if reality needs that).
+
+The `fee_kind` might be enything you enter: 'distribution', 'main fee', etc. 
+Just remember it contributes to connstraint preventing two entries of the same price be active at the same moment.
+
+The `fee_is_perc` indicates whether value given in the `fee_value` is absolute value to be deducted from the unit of energy or percentual rate. For example, if an operator deducts 250CZK for each 1MWh, the record would look like:
+
+| price_type | fee_kind | fee_range                                                   | fee_value | fee_is_perc | fee_unit |
+|------------|----------|-------------------------------------------------------------|-----------|-------------|----------|
+| sale       | absfee   | ["2025-01-01 00:00:00+01","2026-01-01 00:00:00+01")         | 250       | false       | MWh      |
+
+If you decided to store energy in kWh unit, it's needed to adjust the value respectively (0.25 for kWh in our example)
+
+If the operator deducts percentual fee, let's say 15%, the entry would *not be dependend on units* and would look like:
+
+| price_type | fee_kind | fee_range                                                   | fee_value | fee_is_perc | fee_unit |
+|------------|----------|-------------------------------------------------------------|-----------|-------------|----------|
+| sale       | relfee   | ["2025-01-01 00:00:00+01","2026-01-01 00:00:00+01")         | 0.15      | true        | MWh      |
+
+Independence from units comes from the fact, that it should be deducted from the already calculated cost, which takes the units into account.
 
 Next, populate these tables with data. Since the new CAGGs will add costs to each aggregation, prices and fees for a period must be present in their respective tables before the CAGG runs. As mentioned, fees are set manually.
 
@@ -235,7 +263,7 @@ This change reduces query time from about 1.5 seconds (for a year of data on a R
 
 Note, purchasing on spot requires slight change to the conditions.
 
-## Aggregates for Energy
+## Utility functions
 
 With prices ready, we can finally start creating Continuous Aggregates. As mentioned earlier, we will aggregate both energy and the corresponding costs.
 
@@ -253,23 +281,21 @@ CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_costs_arr
 RETURNS NUMERIC[]
 LANGUAGE 'sql'
 STABLE
-AS $BODY$
+AS $f$
 
-    SELECT Array[SUM(sub.cost), SUM(sub.cost_net)]
+    SELECT Array[trim_scale(sub.cost_net - COALESCE(sub.hf,0)), trim_scale(sub.cost_net)]
     FROM
     (
         SELECT
-            SUM(_value * (price_value - COALESCE(fee_value, 1))) AS cost,
-            SUM(price_value * _value)                            AS cost_net
+            SUM(_value * ((NOT fee_is_perc)::INTEGER*fee_value + fee_is_perc::INTEGER*price_value*fee_value)) AS hf,
+            MAX(price_value * _value) AS cost_net
         FROM ltss_energy_ote.electricity_prices     AS ep
-        LEFT JOIN ltss_energy_ote.electricity_fees  AS ef
-                    ON (ep.price_type, ep.price_kind) = (ef.price_type, ef.price_kind)
-                    AND _time <@ ef.fee_range 
+        LEFT JOIN ltss_energy_ote.electricity_fees  AS ef ON ep.price_type = ef.price_type AND _time <@ ef.fee_range 
         WHERE _time <@ ep.price_range
           AND ep.price_type = _price_type
     ) AS sub
 
-$BODY$;
+$f$;
 
 
 CREATE OR REPLACE FUNCTION ltss_energy_ote.get_entities_for_cagg_energy()
@@ -292,6 +318,15 @@ AS $f$
        ];
 $f$;
 ```
+
+
+The `calculate_costs_arr()` might feel "obfuscated", but it just sums all fees applicable for a price type at given time. Absolute fee is just `energy * fee_value` multiplied by 1 if `fee_is_perc` is FALSE, or by 0 otherwise. Percenutal fee is `energy * price_value * fee_value`, or 0 if `fee_is_perc` is FALSE.
+
+The cost_net uses MAX, since the subquery fetch this value as many times as fees are found (With the same value). While we need the sale price only one. Using MAX() is one of those small SQL tricks you can learn.
+
+Outer query just makes resulting structure (Array) out of values. COALESCE over here is to turn possible NULL value (when no fee is found) into zero.
+
+## Aggregates for Energy
 
 Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the `ltss` table, providing hourly energy and its costs. Although calling `calculate_costs_arr()` twice with the same arguments is not ideal, it's necessary to overcome CAGG limitations.
 
