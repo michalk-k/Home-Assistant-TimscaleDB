@@ -168,7 +168,7 @@ BEGIN
     INSERT INTO ltss_energy_ote.electricity_prices
     (
         price_type,
-        price_kind,
+        price_kind, 
         price_range,
         price_value,
         price_unit
@@ -272,7 +272,8 @@ We will need a `calculate_costs_arr()` function to turn the enregy into price at
 The first-level CAGG also uses the `get_entities_for_cagg_energy()` helper function to select which entities to aggregate.
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_costs_arr
+
+CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_costs_arr2
 (
     _price_type TEXT,
     _time       TIMESTAMPTZ,
@@ -283,17 +284,35 @@ LANGUAGE 'sql'
 STABLE
 AS $f$
 
-    SELECT Array[trim_scale(sub.cost_net - COALESCE(sub.hf,0)), trim_scale(sub.cost_net)]
-    FROM
-    (
-        SELECT
-            SUM(_value * ((NOT fee_is_perc)::INTEGER*fee_value + fee_is_perc::INTEGER*price_value*fee_value)) AS hf,
-            MAX(price_value * _value) AS cost_net
-        FROM ltss_energy_ote.electricity_prices     AS ep
-        LEFT JOIN ltss_energy_ote.electricity_fees  AS ef ON ep.price_type = ef.price_type AND _time <@ ef.fee_range 
-        WHERE _time <@ ep.price_range
-          AND ep.price_type = _price_type
-    ) AS sub
+    WITH 
+	price_net AS 
+	(
+		SELECT trim_scale(SUM(_value * price_value)) AS val
+	    FROM ltss_energy_ote.electricity_prices
+	    WHERE _time <@ price_range
+	      AND price_type = _price_type
+	),
+	fee_abs AS 
+	(
+		SELECT trim_scale(SUM(_value * fee_value)) AS val
+	    FROM ltss_energy_ote.electricity_fees_abs
+	    WHERE _time <@ fee_range
+	      AND fee_type = _price_type
+	),
+	fee_rel AS 
+	(
+		SELECT trim_scale(SUM(_value * price_value*fee_value)) AS val
+		FROM ltss_energy_ote.electricity_prices   AS ep
+		JOIN ltss_energy_ote.electricity_fees_rel AS ef ON (ep.price_type, ep.price_kind) = (ef.price_type, ef.price_kind)
+		WHERE _time <@ ep.price_range
+		  AND _time <@ ef.fee_range
+		  AND ep.price_type = _price_type
+	)
+	SELECT Array[
+					price_net.val + (COALESCE(fee_abs.val,0) + COALESCE(fee_rel.val,0)) * CASE WHEN _price_type = 'sale' THEN -1 ELSE 1 END,
+					price_net.val
+				]
+	FROM price_net, fee_abs, fee_rel;
 
 $f$;
 
@@ -319,12 +338,12 @@ AS $f$
 $f$;
 ```
 
+The `calculate_costs_arr()` turned into a bit more complex. It outputs two values: cost and its net value, which requires to calculate fees. While absolute fee is only about summing the values, percentual fee needs to be deducted from the selected cost (while there might be more costs). This is why percentual cost is joined via pair of type and kind with prices.
+Finally those 3 queries contributes to the result.
 
-The `calculate_costs_arr()` might feel "obfuscated", but it just sums all fees applicable for a price type at given time. Absolute fee is just `energy * fee_value` multiplied by 1 if `fee_is_perc` is FALSE, or by 0 otherwise. Percenutal fee is `energy * price_value * fee_value`, or 0 if `fee_is_perc` is FALSE.
+Fees in tables are stored as non-negavite, so I needed to find a way of determining either fee adds or reduces the net value. I decide to use price_type for that, which is the first place where we mindirectly create constraints in entties names.
 
-The cost_net uses MAX, since the subquery fetch this value as many times as fees are found (With the same value). While we need the sale price only one. Using MAX() is one of those small SQL tricks you can learn.
-
-Outer query just makes resulting structure (Array) out of values. COALESCE over here is to turn possible NULL value (when no fee is found) into zero.
+The function results a structure (Array) consiting two values: gros and net.
 
 ## Aggregates for Energy
 
@@ -471,4 +490,3 @@ FROM src;
 ```
 
 ![alt text](images/grafana-roi-evolution-ote.png)
-
