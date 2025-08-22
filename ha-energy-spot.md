@@ -267,37 +267,32 @@ Note, purchasing on spot requires slight change to the conditions.
 
 With prices ready, we can finally start creating Continuous Aggregates. As mentioned earlier, we will aggregate both energy and the corresponding costs.
 
-We will need a `calculate_costs_arr()` function to turn the enregy into price at a given time. This function returns two values: the cost after deducting handling fees and the net cost. Both will be materialized in the CAGG. The function uses an array to return these values, working around CAGG limitations that prevent subselects or CTEs.
+We will need a `calculate_cost()` function to turn the enregy into price at a given time. This function returns two values: the cost after deducting handling fees and the net cost. Both will be materialized in the CAGG. The function uses an array to return these values, working around CAGG limitations that prevent subselects or CTEs.
 
 The first-level CAGG also uses the `get_entities_for_cagg_energy()` helper function to select which entities to aggregate.
 
 ```sql
 
-CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_costs_arr2
+CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_fee
 (
     _price_type TEXT,
-    _time       TIMESTAMPTZ,
-    _value      NUMERIC
+	_time       TIMESTAMPTZ,
+    _value      NUMERIC,
+	_excludekind TEXT DEFAULT NULL
 )
-RETURNS NUMERIC[]
+RETURNS NUMERIC
 LANGUAGE 'sql'
 STABLE
 AS $f$
 
-    WITH 
-	price_net AS 
-	(
-		SELECT trim_scale(SUM(_value * price_value)) AS val
-	    FROM ltss_energy_ote.electricity_prices
-	    WHERE _time <@ price_range
-	      AND price_type = _price_type
-	),
-	fee_abs AS 
+    WITH
+	fee_abs AS
 	(
 		SELECT trim_scale(SUM(_value * fee_value)) AS val
 	    FROM ltss_energy_ote.electricity_fees_abs
 	    WHERE _time <@ fee_range
 	      AND fee_type = _price_type
+		  AND fee_kind IS DISTINCT FROM _excludekind
 	),
 	fee_rel AS 
 	(
@@ -307,15 +302,36 @@ AS $f$
 		WHERE _time <@ ep.price_range
 		  AND _time <@ ef.fee_range
 		  AND ep.price_type = _price_type
+		  AND fee_kind IS DISTINCT FROM _excludekind
 	)
-	SELECT Array[
-					price_net.val + (COALESCE(fee_abs.val,0) + COALESCE(fee_rel.val,0)) * CASE WHEN _price_type = 'sale' THEN -1 ELSE 1 END,
-					price_net.val
-				]
+	SELECT COALESCE(fee_abs.val,0) + COALESCE(fee_rel.val,0)
 	FROM price_net, fee_abs, fee_rel;
 
 $f$;
 
+
+
+CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_cost
+(
+    _price_type TEXT
+	_time       TIMESTAMPTZ,
+    _value      NUMERIC,
+	_excludekind TEXT DEFAULT NULL
+	_price_kind TEXT DEFAULT NULL
+)
+RETURNS NUMERIC[]
+LANGUAGE 'sql'
+STABLE
+AS $f$
+
+	SELECT
+		trim_scale(SUM(_value * price_value)) AS val_total
+	FROM ltss_energy_ote.electricity_prices
+	WHERE _time <@ price_range
+	  AND price_type = _price_type
+	  AND price_kind IS DISTINCT FROM _excludekind
+
+$f$;
 
 CREATE OR REPLACE FUNCTION ltss_energy_ote.get_entities_for_cagg_energy()
 RETURNS TEXT[]
@@ -338,7 +354,7 @@ AS $f$
 $f$;
 ```
 
-The `calculate_costs_arr()` turned into a bit more complex. It outputs two values: cost and its net value, which requires to calculate fees. While absolute fee is only about summing the values, percentual fee needs to be deducted from the selected cost (while there might be more costs). This is why percentual cost is joined via pair of type and kind with prices.
+The `calculate_cost()` turned into a bit more complex. It outputs two values: cost and its net value, which requires to calculate fees. While absolute fee is only about summing the values, percentual fee needs to be deducted from the selected cost (while there might be more costs). This is why percentual cost is joined via pair of type and kind with prices.
 Finally those 3 queries contributes to the result.
 
 Fees in tables are stored as non-negavite, so I needed to find a way of determining either fee adds or reduces the net value. I decide to use price_type for that, which is the first place where we mindirectly create constraints in entties names.
@@ -347,26 +363,46 @@ The function results a structure (Array) consiting two values: gros and net.
 
 ## Aggregates for Energy
 
-Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the `ltss` table, providing hourly energy and its costs. Although calling `calculate_costs_arr()` twice with the same arguments is not ideal, it's necessary to overcome CAGG limitations.
+Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the `ltss` table, providing hourly energy and its costs. Although calling `calculate_cost()` twice with the same arguments is not ideal, it's necessary to overcome CAGG limitations.
 
 The daily CAGG simply sums the hourly values.
 
 ```sql
+    
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
 WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague') AS bucket,
     entity_id,
     delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS value,
-    (ltss_energy_ote.calculate_costs_arr('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[1] AS cost_purchase,
-    (ltss_energy_ote.calculate_costs_arr('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[2] AS cost_purchase_net,
-    (ltss_energy_ote.calculate_costs_arr('sale',     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[1] AS cost_sale,
-    (ltss_energy_ote.calculate_costs_arr('sale',     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC))[2] AS cost_sale_net
+    ltss_energy_ote.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
+	+ltss_energy_ote.calculate_fee('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
+	AS cost_purchase,
+	
+    ltss_energy_ote.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _excludekind => 'energy')
+	+ltss_energy_ote.calculate_fee('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _excludekind => 'energy')
+	AS cost_purchase_upshift,
+	
+	ltss_energy_ote.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _price_kind => 'energy') 
+	AS cost_purchase_energy,
+	
+    ltss_energy_ote.calculate_cost('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
+	-ltss_energy_ote.calculate_fee('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
+	AS cost_sale,
+	
+    ltss_energy_ote.calculate_cost('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _excludekind => 'energy')
+	+ltss_energy_ote.calculate_fee('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _excludekind => 'energy')
+	AS cost_sale_upshift,
+	
+	ltss_energy_ote.calculate_cost('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _price_kind => 'energy') 
+	AS cost_sale_energy,
+	
 FROM ltss
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
 GROUP BY 1, 2
 WITH NO DATA;
+
 
 -- create daily CAGG based on hourly one
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_daily
@@ -374,11 +410,13 @@ WITH (timescaledb.continuous) AS
 SELECT
    time_bucket('1d'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
    entity_id,
-   SUM(value)               AS value,
-   SUM(cost_purchase)       AS cost_purchase,
-   SUM(cost_purchase_net)   AS cost_purchase_net,
-   SUM(cost_sale)           AS cost_sale,
-   SUM(cost_sale_net)       AS cost_sale_net
+   SUM(value)                   AS value,
+   SUM(cost_purchase)           AS cost_purchase,          -- total cost = spot+fee+tax
+   SUM(cost_purchase_upshift)   AS cost_purchase_upshift,  -- totalcost-(energy*tax)
+   SUM(cost_purchase_energy)    AS cost_purchase_energy    -- net cost (ie spot)
+   SUM(cost_sale)               AS cost_sale,              -- total cost = spot-fee (- potential taxes)
+   SUM(cost_sale_upshift)       AS cost_sale_upshift,      -- totalcost-(energy*tax)
+   SUM(cost_sale_energy)        AS cost_sale_energy        -- net cost (ie spot)
 FROM ltss_energy_ote.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
