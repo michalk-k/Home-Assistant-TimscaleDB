@@ -363,9 +363,32 @@ The function results a structure (Array) consiting two values: gros and net.
 
 ## Aggregates for Energy
 
-Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the `ltss` table, providing hourly energy and its costs. Although calling `calculate_cost()` twice with the same arguments is not ideal, it's necessary to overcome CAGG limitations.
+Now, create hierarchical CAGGs. The hourly CAGG aggregates data from the ltss`table, the daily CAGG simply sums the hourly values.
+Although calling `calculate_cost()` from hourly CAGG multiple times with the same arguments looks weird, it's necessary to overcome CAGG limitation. As a funny fact, it's more performant than using JOINS instead of functions.
 
-The daily CAGG simply sums the hourly values.
+What data are provided by CAGGs is up to individual needs and decissions. Supposingly these  values might be considered usefull in every setup:
+
+* energy
+* its total cost - calculated for purchase and selling prices, incl taxes and fees. Note that taxes and fees might differ for purchasing and sell.
+
+If a comparison of current values to alternative offers is a case, additional values might be helpful. Without it, calculatio row-by-row will be required. It would be more expensive processing power-wise but still acceptable as long it's one-time activity. 
+
+Anyway, let's consider storing following additional data:
+
+* net cost of energy - without distribution, taxes, handling fees etc.
+* upshifting price - value of all additional fees added to energy price. This price doesn't count energy taxes in. 
+
+It makes to store 6 cost values. 
+
+* cost_purchase (gross energy value + fees) - total purchase cost of this energy
+* cost_purchase_upshift - cost added on top of energy cost (tax for energy included if applicable)
+* cost_purchase_energy - net cost of the this energy
+
+* cost_sale (gross energy value - fees) - total sale cost of this energy
+* cost_purchase_upshift - cost added on top of energy cost (tax for energy included if applicable)
+* cost_purchase_energy - net cost of the this energy
+
+Not all of them are useful for every measured energy but a cost of storing them is neglible. There is always an option to create dedicated CAGGs for various needs.
 
 ```sql
     
@@ -441,7 +464,7 @@ SELECT add_continuous_aggregate_policy
    'ltss_energy_ote.cagg_energy_daily', '3d'::INTERVAL, '4h'::INTERVAL, '12h'::INTERVAL
 );
 ```
-
+>
 At this point, all CAGGs are configured for real-time updates, automatic refresh policies are in place, and essential access privileges have been granted.
 
 As explained previously, `WITH NO DATA` means CAGGs are not filled at creation. Once aggregate policies are set, they fill CAGGs with new data from `ltss` table.
