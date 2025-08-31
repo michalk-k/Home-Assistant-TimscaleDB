@@ -1,10 +1,12 @@
 ## Preface
 
-This article was planned as a small addition to previous part, adding support for spot prices. Unexpectedly, it uncovered additional needs, turning into pretty serious  challanges. At the end it grown into final solution farer away more from original than I expected.
+This guide walks you through creation of database objects needed to maintain prices, fees and taxes as well as methods of collecting long term energy data and costs.
+
+This article was planned as a small addition to the previous part, adding support for spot prices. Unexpectedly, it uncovered pretty big challanges, growing into final solution farer away from original more than I expected. In fact it replaces big part of the initial proposal.
+
+In future I'm going to join both articles into final one, updating TimescaleDB syntax to most recent one.
 
 > This new method also works well for slow-changing prices. It may be wise to use it from the start.
-
-This guide walks you through creation of database needed to maintain prices, fees and taxes as well as methods of collecting long term energy data and costs.
 
 We'll create all objects in a dedicated schema: `ltss_energy_ote`. This allows both data collection methods (I reffer to previous article) to coexist while remaining physically separated. OTE refers to the spot price operator in the Czech Republic, but you can use any suffix you prefer.
 
@@ -58,11 +60,13 @@ flowchart LR
 The overall concept is similar to the one from the previous article, but with two key changes:
 
 **1. Handling Fees**  
-Handling fees are common when trading on the spot market via a third party (the operator). The two most common billing methods are: a fixed price per energy unit (e.g., 250 CZK per 1 MWh) and a percentage of the energy price (e.g., 15% of the sold energy price). The solution below supports both. Because of different taxation for sold and purchased energy, the energy price should be stored as net value. 
+Handling fees are common when trading on the spot market via a third party (the operator). The two most common billing methods are: a fixed price per energy unit (e.g., 250 CZK per 1 MWh) and a percentage of the energy price (e.g., 15% of the sold energy price). The second one is also applied for deducting taxes.
+
+The solution presented below supports both. Because of different taxation for sold and purchased energy, the energy price should be stored as net value. 
 
 > Note: Prescription of prices and fees must be created in database manually, in advance of incoming energy data. Regardless spot prices, there are many of them which need to be entered manually, since an API for automatic retrieval is unlikely. Spot values will be delivered in automated way.
 
-The above requires quite a changes to prices structure, introducing tables for two types of fees. I took the opportunity to rename some objects.
+The above requires quite a changes to prices structure known from previous article, introducing tables for two types of fees. I took this as an opportunity to rename some objects.
 
 **2. CAGGs Calculate and Store Energy Costs**  
 Materializing costs in CAGGs improves performance when reading data. Rendering graphs no longer requires lookups to the prices table, which is especially helpful on resource-constrained hardware like a Raspberry Pi. We will aggregate both prices: sale and purchase. On top of that we will store net and upshift values which should enable options for future analysis.
@@ -99,8 +103,7 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_fees_pricerel
     price_name  TEXT NOT NULL,
     fee_name    TEXT NOT NULL,
     fee_period  TSTZRANGE NOT NULL,
-    fee_value   NUMERIC NOT NULL,
-    volume_unit    TEXT NOT NULL,
+    fee_value   NUMERIC NOT NULL
     CONSTRAINT pk_electricityfeesrel PRIMARY KEY (trade_type, price_name, fee_name, fee_period),
     CONSTRAINT xc_electricityfeesrel_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, fee_period WITH &&)
 --    CONSTRAINT fk_electricityfeesrel_prices FOREIGN KEY (trade_type, price_name) REFERENCES ltss_energy_ote2.electricity_prices (trade_type, price_name)
@@ -151,23 +154,27 @@ Example below shows configuration of buying and selling for spot prices. On top 
 | purchase   | energy       | ["2025-01-01 02:00:00+01","2025-01-01 03:00:00+01")         | 2.598       | kWh       |
 | ...        | ...       | ...         | ...          | kWh       |
 
-Notice sale and purchase prices stored for the same period of time. This is how we will store spot prices. Granted, on spot there is only one price, that can be used for buying, selling or both. Storing the single value for each trade type is decission supported by less complex resulting code as well and compatibility with systemswhere user doesn't operate on spot.
+Notice how sale and purchase prices of the same value are stored for the same period of time. This is how we will handle spot prices. Granted, on spot there is only one price, that can be used for buying, selling or both. Storing the value twice, for each trade type separatelly, is a decission supported by less complex resulting code as well and compatibility with systems where user doesn't operate on spot.
 
 **price-relative fee table**  (value based)
 
-| trade_type | price_name | fee_name |  fee_period                                             | fee_value | volume_unit |
-|------------|------------|----------|--------------------------------------------------------|-----------|----------|
-| purchase   | energy     |  VAT     | ["2025-01-01 00:00:00+01","2026-01-01 00:00:00+01")    | 0.21      | kWh      |
+| trade_type | price_name | fee_name |  fee_period                                            | fee_value |
+|------------|------------|----------|--------------------------------------------------------|-----------|
+| purchase   | energy     |  VAT     | ["2025-01-01 00:00:00+01","2026-01-01 00:00:00+01")    | 0.21      |
+
+in order to "link" the price-related fee with the price, trade_type and price_name have to be filled with related values from the price table.
 
 **volume-relative fee table**
  fee table**
 
-| trade_type   | fee_name | fee_period                                              | fee_value | volume_unit |
+| trade_type | fee_name   | fee_period                                             | fee_value | volume_unit |
 |------------|------------|--------------------------------------------------------|-----------|----------|
 | sale       | energy     | ["2025-01-01 00:00:00+01","2026-01-01 00:00:00+01")    | 0.25      | kWh      |
 
 
+> Please note, that contracts often list prices for MWh. Tables above list kWh, however it has only informative purpose. The code proposed bellow doesn't implement recalculation between units. It expects that energy comes in kWh. All my HA energy sensors are ported in kWH. 
 
+> Fees stored in price-relative fee table are units independed
 
 ### Feeding with data
 
@@ -452,7 +459,7 @@ It makes to store 6 cost values.
 * cost_sale_upshift - trading cost when saling
 * cost_sale_energy - net cost of the sold energy
 
-Not all of them are useful for every measured energy but a cost of storing them is neglible. There is always an option to create dedicated CAGGs for various needs.
+Not all of them are useful for every measured energy. But we keep all numbers to be used for FVE project efficiency analysis in one place. Price of storing additional although useless data is neglible. Though, for collecting data from house appliances I would use another CAGG.
 
 ```sql
     
@@ -571,7 +578,7 @@ WHERE bucket >= '2024-08-08' -- FVE installation date
 This approach to partial costs is used throughout the cost presentation graphs.  
 You can perform calculations in PostgreSQL or Grafana; the performance difference is negligible. Here, we fetch the minimal data by doing the math in the database.
 
-The query below returns two values: Sold and Avoided. Use Grafana Transformations to create an additional series representing their sum.
+The query below returns evolution of two values: Sold and Avoided. Then Grafana Transformations provides 3rd one, representing sum of both. Don't forget do disable stacking for this summing time series.
 
 ```sql
 WITH 
