@@ -92,21 +92,23 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_prices
     price_period TSTZRANGE NOT NULL,
     price_value NUMERIC NOT NULL,
     volume_unit  TEXT NOT NULL,
-    CONSTRAINT pk_electricitycost PRIMARY KEY (trade_type, price_name, price_period),
-    CONSTRAINT xc_electricitycost_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, price_period WITH &&)
+    CONSTRAINT pk_electricityprices PRIMARY KEY (trade_type, price_name, price_period),
+    CONSTRAINT xc_electricityprices_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, price_period WITH &&),
+    CONSTRAINT ck_electricityprices_tradetype CHECK (trade_type IN ('sale', 'purchase'))
 );
 
 
 CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_fees_pricerel
 (
-    trade_type  TEXT NOT NULL,
+    trade_type  TEXT NOT NULL CHECK (trade_type IN ('sale', 'purchase')),
     price_name  TEXT NOT NULL,
     fee_name    TEXT NOT NULL,
     fee_period  TSTZRANGE NOT NULL,
     fee_value   NUMERIC NOT NULL
-    CONSTRAINT pk_electricityfeesrel PRIMARY KEY (trade_type, price_name, fee_name, fee_period),
-    CONSTRAINT xc_electricityfeesrel_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, fee_period WITH &&)
---    CONSTRAINT fk_electricityfeesrel_prices FOREIGN KEY (trade_type, price_name) REFERENCES ltss_energy_ote2.electricity_prices (trade_type, price_name)
+    CONSTRAINT pk_electricityfeespricerel PRIMARY KEY (trade_type, price_name, fee_name, fee_period),
+    CONSTRAINT xc_electricityfeespricerel_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, fee_period WITH &&),
+    CONSTRAINT ck_electricityfeespricerel_tradetype CHECK (trade_type IN ('sale', 'purchase'))
+--    CONSTRAINT fk_electricityfeespricerel_prices FOREIGN KEY (trade_type, price_name) REFERENCES ltss_energy_ote2.electricity_prices (trade_type, price_name)
 );
 
 CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_fees_volrel
@@ -116,22 +118,25 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_fees_volrel
     fee_period  TSTZRANGE NOT NULL,
     fee_value   NUMERIC NOT NULL,
     volume_unit    TEXT NOT NULL,
-    CONSTRAINT pk_electricityfeesabs PRIMARY KEY (trade_type, fee_name, fee_period),
-    CONSTRAINT xc_electricityfeesabs_unique EXCLUDE USING gist (trade_type WITH =, fee_name WITH =, fee_period WITH &&)
+    CONSTRAINT pk_electricityfeesvolrel PRIMARY KEY (trade_type, fee_name, fee_period),
+    CONSTRAINT xc_electricityfeesvolrel_unique EXCLUDE USING gist (trade_type WITH =, fee_name WITH =, fee_period WITH &&),
+    CONSTRAINT ck_electricityfeesvolrel_tradetype CHECK (trade_type IN ('sale', 'purchase'))
 );
 
-COMMENT ON TABLE ltss_energy_ote2.electricity_prices IS 'Net values of prices contributing to the electric energy costs';
+COMMENT ON TABLE ltss_energy_ote2.electricity_prices IS 'Net prices for an energy volume';
 
-COMMENT ON TABLE ltss_energy_ote2.electricity_fees_pricerel IS 'Taxes of fees list, to be deducted from the net value';
+COMMENT ON TABLE ltss_energy_ote2.electricity_fees_pricerel IS 'Fees to be calculated from the net value of energy volume';
 
-COMMENT ON TABLE ltss_energy_ote2.electricity_fees_volrel IS 'Fees as absolute value deducted from a unit of energy';
+COMMENT ON TABLE ltss_energy_ote2.electricity_fees_volrel IS 'Fees to be calculated for volume of energy';
 
 GRANT USAGE ON SCHEMA ltss_energy_ote2 TO public;
 GRANT SELECT ON TABLE ltss_energy_ote2.electricity_fees_volrel, ltss_energy_ote2.electricity_fees_pricerel, ltss_energy_ote2.electricity_prices TO public;
 ```
 
-The structure of `electricity_prices` table has been discussed already. The main change is, that we agreed to store net values only here. On top of that, while there is no constraint proposed, I suggest to stick with 'purchase' and 'sale' values for the `trade_type`. If different, it has to be reflected in code presented later.
-Also `energy` as a value of `price_name` will be used multiple times later on. It represents a price of energy, in contrary to other prices like distribution.
+The structure of `electricity_prices` table has been discussed previously. The main change is, that now it will carry net prices ony. On top of that, trade_type (previously price_type) is locked to two possible values: 'purchase' and 'sale', It's because the rest of code depends on them. From various methods how to limit possible values I have chosen check constraint as most flexible in case of need to adsjust them. 
+This constraint will be applied to other tables as well.
+
+Also I suggest to allocate an `energy` name to describe pure electric energy price (ie spot price). This name is also often used in the code presented later. Other entries like distribution.... OMG F***
 
 Fees deserves more detailed description. There are two kind of prices supported
 
@@ -236,7 +241,7 @@ BEGIN
         (j->'price')::NUMERIC,
         'kWh'
     FROM jsonb_array_elements(NEW.attributes->'data') AS j
-    ON CONFLICT ON CONSTRAINT pk_electricitycost 
+    ON CONFLICT ON CONSTRAINT pk_electricityprices 
     DO UPDATE
     SET price_value = EXCLUDED.price_value
     WHERE price_value <> EXCLUDED.price_value;
