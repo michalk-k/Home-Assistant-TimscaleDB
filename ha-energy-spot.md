@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_fees_pricerel
     price_name  TEXT NOT NULL,
     fee_name    TEXT NOT NULL,
     fee_period  TSTZRANGE NOT NULL,
-    fee_value   NUMERIC NOT NULL
+    fee_value   NUMERIC NOT NULL,
     CONSTRAINT pk_electricityfeespricerel PRIMARY KEY (trade_type, price_name, fee_name, fee_period),
     CONSTRAINT xc_electricityfeespricerel_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, fee_period WITH &&),
     CONSTRAINT ck_electricityfeespricerel_tradetype CHECK (trade_type IN ('sale', 'purchase'))
@@ -208,7 +208,7 @@ TRADES - contains array of strings containing `sale` or `purchase` or `bothtrade
 
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_energy_ote.tr_ltss_oteprices()
+CREATE OR REPLACE FUNCTION ltss_energy_ote2.tr_ltss_oteprices()
     RETURNS trigger
     LANGUAGE 'plpgsql'
     SECURITY DEFINER
@@ -226,13 +226,13 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    INSERT INTO ltss_energy_ote.electricity_prices
+    INSERT INTO ltss_energy_ote2.electricity_prices AS ep
     (
         trade_type,
         price_name, 
         price_period,
         price_value,
-        price_unit
+        volume_unit
     )
     SELECT 
         unnest(TRADES),
@@ -244,14 +244,14 @@ BEGIN
     ON CONFLICT ON CONSTRAINT pk_electricityprices 
     DO UPDATE
     SET price_value = EXCLUDED.price_value
-    WHERE price_value <> EXCLUDED.price_value;
+    WHERE ep.price_value <> EXCLUDED.price_value;
 
     RETURN NULL;
 
 EXCEPTION WHEN others THEN
     GET STACKED DIAGNOSTICS err_msg  = MESSAGE_TEXT,
                             err_code = RETURNED_SQLSTATE;
-    RAISE WARNING '[%], %', err_code, err_msg;
+    RAISE WARNING 'ERROR: [%], %', err_code, err_msg;
     RETURN NULL;
 END;
 $BODY$;
@@ -260,7 +260,7 @@ CREATE OR REPLACE TRIGGER tr_ltss_oteprices
 AFTER INSERT
 ON public.ltss
 FOR EACH ROW
-EXECUTE FUNCTION ltss_energy_ote.tr_ltss_oteprices();
+EXECUTE FUNCTION ltss_energy_ote2.tr_ltss_oteprices();
 ```
 
 Note the error handling: by default, any error rolls back the transaction. Here, we prioritize having complete data in the `ltss` table. Any error thrown by the trigger function will be suppressed and logged as warning.
@@ -303,21 +303,20 @@ Below I show two ready-to-use in Grafana queries: one for sporadic and irregural
 
 **Query A**
 ```sql
-SELECT time as time, ec.trade_type, ec.price_name, price_value * COALESCE(fee_value,1) AS price_valuea
+SELECT time as time, price_value * COALESCE(1+fee_value,1) AS price, format('%s (%s)', ec.trade_type, ec.price_name) as type
 FROM ltss_energy_ote2.electricity_prices AS ec
-JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 h'::INTERVAL) AS x(time) ON TRUE
+JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 d'::INTERVAL) AS x(time) ON TRUE
 LEFT JOIN ltss_energy_ote2.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE x.time <@ price_period
-AND (ec.trade_type, ec.price_name) NOT IN (('sale', 'energy'),('purchase', 'energy'))
-```
+AND (ec.trade_type, ec.price_name) NOT IN (('sale', 'energy'))
 
-**Query B**
-```sql
-SELECT LOWER(price_period) AS "Time", ec.trade_type, ec.price_name, price_value * COALESCE(fee_value,1) AS price_valueb
+UNION
+
+SELECT LOWER(price_period) AS "Time", price_value * COALESCE(fee_value,1) AS price, format('%s (%s)', ec.trade_type, ec.price_name) as type
 FROM ltss_energy_ote2.electricity_prices AS ec
 LEFT JOIN ltss_energy_ote2.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE LOWER(price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
-AND (ec.trade_type, ec.price_name) IN (('sale', 'energy'),('purchase', 'energy'))
+AND (ec.trade_type, ec.price_name) IN (('sale', 'energy'))
 ```
 
 Query A, generates timeseries from infrequent price points. It excludes sale and purchase energy prices since they are assumed to be hourly records representing spot prices.
