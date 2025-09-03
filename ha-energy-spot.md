@@ -335,30 +335,30 @@ This CAGG will also use the `get_entities_for_cagg_energy()` helper function to 
 
 ```sql
 
-CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_cost
+CREATE OR REPLACE FUNCTION ltss_energy_ote2.calculate_cost
 (
-    _trade_type TEXT
+    _trade_type TEXT,
     _time       TIMESTAMPTZ,
     _value      NUMERIC,
-    _exclude    TEXT DEFAULT NULL
+    _exclude    TEXT DEFAULT NULL,
     _include    TEXT DEFAULT NULL
 )
-RETURNS NUMERIC[]
+RETURNS NUMERIC
 LANGUAGE 'sql'
 STABLE
 AS $f$
 
-	SELECT
-		trim_scale(SUM(_value * price_value)) AS val_total
-	FROM ltss_energy_ote.electricity_prices
-	WHERE _time <@ price_period
-	  AND trade_type = _trade_type
-	  AND price_name IS DISTINCT FROM _exclude
+    SELECT
+        trim_scale(SUM(_value * price_value)) AS val_total
+    FROM ltss_energy_ote2.electricity_prices
+    WHERE _time <@ price_period
+      AND trade_type = _trade_type
+      AND price_name IS DISTINCT FROM _exclude
       AND price_name = COALESCE(_include, price_name)
 
 $f$;
 
-CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_fee
+CREATE OR REPLACE FUNCTION ltss_energy_ote2.calculate_fee
 (
     _trade_type TEXT,
     _time       TIMESTAMPTZ,
@@ -371,31 +371,31 @@ STABLE
 AS $f$
 
     WITH
-	fee_abs AS
-	(
-		SELECT trim_scale(SUM(_value * fee_value)) AS val
-	    FROM ltss_energy_ote.electricity_fees_volrel
-	    WHERE _time <@ fee_period
-	      AND trade_type = _trade_type
-		  AND fee_kind IS DISTINCT FROM _exclude
-	),
-	fee_rel AS 
-	(
-		SELECT trim_scale(SUM(_value * price_value * fee_value)) AS val
-		FROM ltss_energy_ote.electricity_prices   AS ep
-		JOIN ltss_energy_ote.electricity_fees_pricerel AS ef ON (ep.trade_type, ep.price_name) = (ef.trade_type, ef.price_name)
-		WHERE _time <@ ep.price_period
-		  AND _time <@ ef.fee_period
-		  AND ep.trade_type = _trade_type
-		  AND fee_kind IS DISTINCT FROM _exclude
-	)
-	SELECT COALESCE(fee_abs.val, 0) + COALESCE(fee_rel.val, 0)
-	FROM price_net, fee_abs, fee_rel;
+    fee_abs AS
+    (
+        SELECT trim_scale(SUM(_value * fee_value)) AS val
+        FROM ltss_energy_ote2.electricity_fees_volrel
+        WHERE _time <@ fee_period
+          AND trade_type = _trade_type
+          AND fee_name IS DISTINCT FROM _exclude
+    ),
+    fee_rel AS 
+    (
+        SELECT trim_scale(SUM(_value * price_value * fee_value)) AS val
+        FROM ltss_energy_ote2.electricity_prices   AS ep
+        JOIN ltss_energy_ote2.electricity_fees_pricerel AS ef ON (ep.trade_type, ep.price_name) = (ef.trade_type, ef.price_name)
+        WHERE _time <@ ep.price_period
+          AND _time <@ ef.fee_period
+          AND ep.trade_type = _trade_type
+          AND fee_name IS DISTINCT FROM _exclude
+    )
+    SELECT COALESCE(fee_abs.val, 0) + COALESCE(fee_rel.val, 0)
+    FROM fee_abs, fee_rel;
 
 $f$;
 
 
-CREATE OR REPLACE FUNCTION ltss_energy_ote.get_entities_for_cagg_energy()
+CREATE OR REPLACE FUNCTION ltss_energy_ote2.get_entities_for_cagg_energy()
 RETURNS TEXT[]
 LANGUAGE 'sql'
 IMMUTABLE
@@ -466,44 +466,43 @@ It makes to store 6 cost values.
 Not all of them are useful for every measured energy. But we keep all numbers to be used for FVE project efficiency analysis in one place. Price of storing additional although useless data is neglible. Though, for collecting data from house appliances I would use another CAGG.
 
 ```sql
-    
-CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
+CREATE MATERIALIZED VIEW ltss_energy_mnd.cagg_energy_hourly
 WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague') AS bucket,
     entity_id,
     delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS value,
-    ltss_energy_ote.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
-	+ltss_energy_ote.calculate_fee('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
-	AS purchase_cost,
-	
-    ltss_energy_ote.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _exclude => 'energy')
-	+ltss_energy_ote.calculate_fee('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _exclude => 'energy')
-	AS purchase_trading_cost,
-	
-	ltss_energy_ote.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _price_name => 'energy') 
-	AS purchase_energy_cost,
-	
-    ltss_energy_ote.calculate_cost('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
-	-ltss_energy_ote.calculate_fee('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
-	AS sale_income, -- net income
-	
-    ltss_energy_ote.calculate_cost('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _exclude => 'energy')
-	+ltss_energy_ote.calculate_fee('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _exclude => 'energy')
-	AS sale_trading_cost, -- trading costs
-	
-	ltss_energy_ote.calculate_cost('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _price_name => 'energy') 
-	AS sale_energy_cost, -- net cost of sold energy
-	
+    ltss_energy_mnd.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
+    +ltss_energy_mnd.calculate_fee('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
+    AS purchase_cost,
+    
+    ltss_energy_mnd.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _exclude => 'energy')
+    +ltss_energy_mnd.calculate_fee('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _exclude => 'energy')
+    AS purchase_trading_cost,
+    
+    ltss_energy_mnd.calculate_cost('purchase', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _include => 'energy') 
+    AS purchase_energy_cost,
+    
+    ltss_energy_mnd.calculate_cost('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
+    -ltss_energy_mnd.calculate_fee('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC)
+    AS sale_income, -- net income
+    
+    ltss_energy_mnd.calculate_cost('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _exclude => 'energy')
+    +ltss_energy_mnd.calculate_fee('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _exclude => 'energy')
+    AS sale_trading_cost, -- trading costs
+    
+    ltss_energy_mnd.calculate_cost('sale', time_bucket('1h'::INTERVAL, "time", 'Europe/Prague'), delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC, _include => 'energy') 
+    AS sale_energy_cost -- net cost of sold energy
+    
 FROM ltss
-WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy())
+WHERE entity_id = ANY (ltss_energy_mnd.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
 GROUP BY 1, 2
 WITH NO DATA;
 
 
 -- create daily CAGG based on hourly one
-CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_daily
+CREATE MATERIALIZED VIEW ltss_energy_mnd.cagg_energy_daily
 WITH (timescaledb.continuous) AS
 SELECT
    time_bucket('1d'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
@@ -511,11 +510,11 @@ SELECT
    SUM(value)                   AS value,
    SUM(purchase_cost)           AS purchase_cost,          -- total cost = spot+fee+tax
    SUM(purchase_trading_cost)   AS purchase_trading_cost,  -- totalcost-(energy*tax)
-   SUM(purchase_energy_cost)    AS purchase_energy_cost    -- net cost (ie spot)
+   SUM(purchase_energy_cost)    AS purchase_energy_cost,   -- net cost (ie spot)
    SUM(sale_income)             AS sale_income,            -- total cost = spot-fee (- potential taxes)
    SUM(sale_trading_cost)       AS sale_trading_cost,      -- totalcost-(energy*tax)
    SUM(sale_energy_cost)        AS sale_energy_cost        -- net cost (ie spot)
-FROM ltss_energy_ote.cagg_energy_hourly
+FROM ltss_energy_mnd.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
 
@@ -560,23 +559,29 @@ For example, the following SQL query returns Return On Investment (ROI). ROI is 
 
 ```sql
 SELECT 
-    SUM
+    ROUND(SUM(value)         FILTER (WHERE entity_id ~ 'injected'),2) AS energy_injected,
+    ROUND(SUM(value)         FILTER (WHERE entity_id ~ 'purchased'),2) AS energy_purchased,
+    ROUND(SUM(value)         FILTER (WHERE entity_id ~ 'cube|mainhouse'),2) AS energy_consumed,
+    ROUND(SUM(sale_income)   FILTER (WHERE entity_id ~ 'injected'),2) AS price_sold,
+    ROUND(SUM(purchase_cost) FILTER (WHERE entity_id ~ 'purchased'),2) AS price_purchased,
+    ROUND(SUM(purchase_cost) FILTER (WHERE entity_id ~ 'cube|mainhouse'),2) AS price_consumed,
+    ROUND(SUM
     (
         CASE
             WHEN entity_id ~ 'injected'         THEN sale_income
             WHEN entity_id ~ 'purchased'        THEN -1 * purchase_cost
             WHEN entity_id ~ 'cube|mainhouse'   THEN purchase_cost
         END
-    ) AS value
-FROM ltss_energy_ote_cagg_energy_daily
+    ), 2) AS roi
+FROM ltss_energy_mnd.cagg_energy_daily
 WHERE bucket >= '2024-08-08' -- FVE installation date
-  AND $__timeFilter("bucket")
   AND entity_id  IN (
                         'sensor.energy_injected_hourly', 
                         'sensor.energy_purchased_hourly',
                         'sensor.pg_mainhouse_total_energy_energy_hourly',
                         'sensor.pg_cube_total_energy_energy_hourly'
                     )
+
 ```
 
 This approach to partial costs is used throughout the cost presentation graphs.  
@@ -625,3 +630,64 @@ FROM src;
 ```
 
 ![alt text](images/grafana-roi-evolution-ote.png)
+
+<details>
+<summary>some examples</summary>
+```
+WITH
+s0 AS MATERIALIZED
+(
+  SELECT bucket, value,  
+    CASE WHEN entity_id = 'sensor.energy_injected_hourly' THEN 'Injected'
+        WHEN entity_id = 'sensor.energy_purchased_hourly' THEN 'Purchased'
+        WHEN entity_id IN ('sensor.pg_mainhouse_total_energy_energy_hourly',
+                            'sensor.pg_cube_total_energy_energy_hourly') THEN 'Consumption'
+        ELSE entity_id
+    END as entity_id,
+    CASE WHEN entity_id = 'sensor.energy_injected_hourly' THEN 'sale'
+        WHEN entity_id = 'sensor.energy_purchased_hourly' THEN 'purchase'
+        WHEN entity_id IN ('sensor.pg_mainhouse_total_energy_energy_hourly',
+                            'sensor.pg_cube_total_energy_energy_hourly') THEN 'purchase'
+    END as calcmode
+  FROM ltss_energy.cagg_energy_hourly AS ceh
+  WHERE entity_id  IN (
+                            'sensor.energy_injected_hourly', 
+                            'sensor.energy_purchased_hourly',
+                            'sensor.pg_mainhouse_total_energy_energy_hourly',
+                            'sensor.pg_cube_total_energy_energy_hourly'
+                        )
+    AND bucket BETWEEN '2024-08-08' AND NOW()
+    AND bucket>='2024-08-08'
+),
+s1 AS MATERIALIZED
+(
+    SELECT 
+        bucket, 
+        CASE entity_id WHEN 'Purchased' THEN ltss_energy_ote2.calculate_cost('purchase', bucket, value::NUMERIC) + ltss_energy_ote2.calculate_fee('purchase', bucket, value::NUMERIC) END AS purchase,
+        CASE entity_id WHEN 'Consumption' THEN ltss_energy_ote2.calculate_cost('purchase', bucket, value::NUMERIC) + ltss_energy_ote2.calculate_fee('purchase', bucket, value::NUMERIC) END AS consumption,
+        CASE entity_id WHEN 'Injected' THEN ltss_energy_ote2.calculate_cost('sale', bucket, value::NUMERIC) - ltss_energy_ote2.calculate_fee('sale', bucket, value::NUMERIC) END AS sale_250,
+        CASE entity_id WHEN 'Injected' THEN ltss_energy_ote2.calculate_cost('sale', bucket, value::NUMERIC, _include=>'energy') - ltss_energy_ote2.calculate_fee('sale', bucket, value::NUMERIC, _include=>'energy') <= 0 END AS is_negative,
+        CASE entity_id WHEN 'Purchased' THEN value::NUMERIC END AS energy_purchase,
+        CASE entity_id WHEN 'Consumption' THEN value::NUMERIC END AS energy_cons,
+        CASE entity_id WHEN 'Injected' THEN value::NUMERIC END AS energy_inj,
+        entity_id
+    FROM s0
+)
+SELECT
+  --  date_bin('30 days', bucket, '2024-08-08'),
+    SUM(COALESCE(consumption,0)) AS consumption,
+    SUM(COALESCE(purchase,0)) AS purchase,
+    SUM(COALESCE(consumption,0)-COALESCE(purchase,0)) AS savings,
+    SUM(COALESCE(sale_250,0)) AS sale,
+    SUM(COALESCE(CASE is_negative WHEN TRUE THEN 0 ELSE sale_250 END,0)) AS sale_pos,
+    SUM(COALESCE(consumption,0)-COALESCE(purchase,0)+COALESCE(sale_250,0)) AS roi,
+    SUM(COALESCE(consumption,0)-COALESCE(purchase,0)+COALESCE(CASE is_negative WHEN TRUE THEN 0 ELSE sale_250 END,0)) AS roi_pos,
+    SUM(energy_purchase) AS energy_purchased,
+    SUM(energy_cons) AS energy_cons,
+    SUM(energy_inj) AS energy_inj,
+    SUM(CASE is_negative WHEN TRUE THEN 0 ELSE energy_inj END) AS energy_inj
+FROM s1
+--GROUP BY 1
+--ORDER BY 1
+```
+</details>
