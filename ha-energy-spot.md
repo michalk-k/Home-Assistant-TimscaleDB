@@ -376,10 +376,9 @@ If you are not using periodicly recorded prices (ie for spot) you may remove the
 
 With prices ready, we can finally start thinking about Continuous Aggregates. As mentioned earlier, we will aggregate both: energy and the corresponding costs.  With current limitations of CAGG contstruct, it's virtually impossible to write stright SQL query returning our aggregates. So to make it, we need a helper functions calculating net cost and fees: `calculate_cost()` and `calculate_fee()` functions respectively. Both will be called by the first-level CAGG. 
 
-There two functions `get_entities_for_cagg_energy()`  and `get_entities_for_cagg_costs()` provide list of entities to process. Using them make changing this list possible without need of dropping the CAGG.
+Two functions `get_entities_for_cagg_energy()`  and `get_entities_for_cagg_costs()` provide list of entities to process. Using them, instead of listing entities stright within CAGGs, make changing this list possible without need of dropping the CAGG.
 
-
-> If you are using TimescaleDB older than v2.20, you will need to change STABLE to IMMUTABLE. This workaround works under this specific scenario. Otherwise it's not adviced to declare the non-immutable code as IMMUTABLE.
+> If you are using TimescaleDB older than v2.20, you will need to change STABLE to IMMUTABLE. Otherwise the Postgresql reject creation of CAGGs. This workaround works for this specific scenario. Otherwise it's not adviced to declare the non-immutable code as IMMUTABLE and might lead to unwanted and unexpected results.
 
 ```sql
 
@@ -481,34 +480,22 @@ AS $f$
 $f$;
 ```
 
-The `calculate_cost()` function is as easy as it can be. For given trade type, it multiplies energy by all prices found. Then returns the sum of them.
-Its `_exclude` parameter allow to ignore requested price item. We will use it to ignore an *energy*. Similarily, `_include` parameter privide cost of given price entry.
+The `calculate_cost()` function is as easy as it can be. For given trade type, it multiplies given energy by all prices found. Then returns the sum of them.
+Its `_exclude` parameter allow to ignore requested price item by its name. Similarily, `_include` will ensure returning cost only for given price entry,
 
-The `calculate_fee` is a tiny bit more complex, calculating cost of both type of fees for given energy. Like previous function, it also allows to not include some price entries to the result.
+The `calculate_fee()` is a tiny bit more complex, calculating cost of both type of fees for given energy. Like previous function, it also allows to not include some fee entries to the result.
 
-Combining these functions allow to calculate wide range of different costs within CAGG. Obviosly you can use them manually ie for testing purposes.
+Combining these functions allows to calculate wide range of different costs within CAGG. Obviosly you can use them manually ie for testing purposes.
 
-Later on those function will be used within the CAGG to provide values.
-
-* `calculate_cost('Purchase')` + `calculate_fee('Purchase')` = gross, total cost of energy
-* `calculate_cost('Purchase' ... _include='energy')`         = net cost of bought energy (spot)
-* `calculate_fee('Purchase' ... _exclude='energy)` = Trading related costs
-
-Analogically for sale, but notice that fees reduces the price:
-
-* `calculate_cost('Purchase')` - `calculate_fee('Purchase')` =  net income from energy sold
-* `calculate_cost('Purchase' ... _include='energy')`         =  net cost of sold energy (spot)
-* `calculate_fee(purchase ... _exclude=energy) - `calculate_fee(purchase ... _exclude=energy)`  = Trading related costs
-
+> If you changed declaration from STABLE to IMMUTABLE, ensure that you execute `DISCARD PLANS` before each use of those functions (unless prices are not changed or you reconnected to the database).
 
 ## Aggregates for Energy
 
-The first level CAGG is the hourly energy one, aggregating data from the `ltss` table. Other CAGGs uses those precalculated aggregates. 
+The first level CAGG is the hourly energy one, aggregating data from the `ltss` table. Other CAGGs uses those precalculated energy aggregates. 
 
-What is provided by energy CAGGs is up to individual needs and decissions. Likely purchase and sale cost may be considered usefull in every setup.
+What is provided by costs CAGGs is up to individual needs and decissions. If you plan to compare alternative offers in future, it's handy to have access to some precalculated values. While it can be done on-the-fly, it will be more taxing to the system. To the extend that will be unusable for presentation purposes.
 
-If you plan to compare alternative offers in future, it's handy to have access to some precalculated values. While it can be done on-the-fly, it will be more taxing to the system. To the extend that will be unusable for presentation purposes.
-
+Purchase and sale costs may be considered usefull in every setup. Storing net price of energy is useful as well.
 My final proposal is:
 
 * purchase cost (gross energy value + fees)
@@ -519,7 +506,6 @@ My final proposal is:
 * trading cost of sold energy
 * net cost of sold energy
 
-Not all of them are useful for every measured energy. This is why `cagg_costs_hourly` limits processed entities using `get_entities_for_cagg_costs()` function.
 
 ```sql
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
