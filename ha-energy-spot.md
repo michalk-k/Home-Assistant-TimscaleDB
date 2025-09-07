@@ -105,7 +105,7 @@ Materializing costs in dedicated Continuous Aggregates (CAGGs) improves query pe
 3. The energy CAGG can aggregate all energy sensors, while the cost CAGG can focus on a subset of sensors.
 4. The codebase remains cleaner and easier to maintain.
 
-Cost CAGGs will provide sale and purchase metrics for each measured energy source, along with net and upshifted values to support future analysis.
+Cost CAGGs will provide sale and purchase metrics for each measured energy source, along with net and uplifting values to support future analysis.
 
 ## Prices
 
@@ -113,7 +113,7 @@ Tax application depends on local regulations; for example, VAT may be added to p
 
 ### Data Structures
 
-Start by creating the tables for prices and fees. The following script also sets basic privileges on the schema and tables, granting read access to all connected clients.
+Start by creating the schema and tables for prices and fees. The following script also sets basic privileges, granting read access to all connected clients.
 
 
 ```sql
@@ -167,9 +167,13 @@ COMMENT ON TABLE ltss_energy_ote.electricity_fees_volrel IS 'Fees to be calculat
 GRANT USAGE ON SCHEMA ltss_energy_ote2 TO public;
 GRANT SELECT ON TABLE ltss_energy_ote.electricity_fees_volrel, ltss_energy_ote.electricity_fees_pricerel, ltss_energy_ote.electricity_prices TO public;
 ```
-The structure of the `electricity_prices` table was described earlier. The key change is that it now stores only net prices. Additionally, the `trade_type` column (formerly `price_type`) is restricted to two values: `'Purchase'` and `'Sale'`. This is enforced using a check constraint, which is also applied to related tables for consistency. The check constraint approach is chosen for its flexibility should future adjustments be needed.
+The structure of the `electricity_prices` table was described earlier. The key change is that it now stores only net prices. Additionally, the `trade_type` column (formerly `price_type`) is restricted to two values: `Purchase` and `Sale`. This is enforced using a check constraint, which is also applied to related tables for consistency. The check constraint approach is chosen for its flexibility should future adjustments be needed.
 
-It is recommended to use the name `Energy` (with an uppercase first letter) to represent the pure electricity price (i.e., the spot price). This naming convention is used throughout the code and helps with data presentation in Grafana.
+It is recommended to use the name `Energy` to represent the pure electricity price (i.e., the spot price).
+
+Names of entries are proposed as started with an uppercase first letter, to easthetically match other names like 'VAT' and ensuring visualization consistency in Graphana.
+
+ This naming convention is used throughout the code and helps with data presentation in Grafana.
 
 Fees require further explanation, as two types are supported:
 
@@ -220,10 +224,10 @@ In order to properly connect that fee with the price, `trade_type` and `price_na
 
 | trade_type | fee_name   | fee_period                                             | fee_value | volume_unit |
 |------------|------------|--------------------------------------------------------|-----------|----------|
-| Sale       | Energy     | ["2025-01-01 00:00:00+01","2026-01-01 00:00:00+01")    | 0.25      | kWh      |
+| Sale       | Energy     | ["2025-01-01 00:00:00+01",infinity)    | 0.25      | kWh      |
 
 
-> Contracts very oftn list prices for MWh. Tables above list kWh, however it has only informative purpose. The code bellow doesn't implement recalculation between units (not that it's not possible).It expects that **all energy entries stored in ltss table are in kWh.**
+> Contracts very often list prices for MWh. Tables above list kWh, however it has only informative purpose. The code bellow doesn't implement recalculation between units (not that it's not possible).It expects that **all energy entries stored in ltss table are in kWh.**
 
 ### Feeding with data
 
@@ -355,7 +359,7 @@ FROM ltss_energy_ote.electricity_prices AS ec
 JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1d'::INTERVAL) AS x(time) ON TRUE
 LEFT JOIN ltss_energy_ote.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE x.time <@ price_period
-AND (ec.trade_type, ec.price_name) NOT IN (('Sale', 'Energy'))
+AND NOT (ec.trade_type, ec.price_name) IN (('Sale', 'Energy'))
 GROUP BY 1, 3
 
 UNION ALL
@@ -364,7 +368,7 @@ SELECT LOWER(price_period) AS time, SUM(1000 * price_value * COALESCE(1+fee_valu
 FROM ltss_energy_ote.electricity_prices AS ec
 LEFT JOIN ltss_energy_ote.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE LOWER(price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
-AND (ec.trade_type, ec.price_name) IN (('Sale', 'Energy'))
+AND (ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND 
 GROUP BY 1, 3
 ORDER BY type DESC
 ```
@@ -374,7 +378,13 @@ The second subquery specifically returns sale energy prices, which are assumed t
 
 Both subqueries join with price-related fees to present the final prices, rather than just the net values.
 
-If you buy and sell energy on the spot market, you might consider including the `('Purchase', 'Energy')` pair to both query conditions. If you do not use periodically recorded prices, you can omit the second subquery and remove the related condition from the first one. In this scenario, it might be reasonable to display all prices - including their individual components - within a single graph.
+> Applying volume-related prices at this point is not possible. However, once energy data has been aggregated, you can combine the price with any applicable volume-based fees,
+
+If you buy and sell energy on the spot market, you might consider including the `('Purchase', 'Energy')` pair to both query conditions.
+
+If you switch between fixed and spot pricing, ensure your SQL query conditions accurately reflect the transition period. 
+
+If you do not use periodically recorded prices, you can omit the second subquery and remove the related condition from the first one. In this scenario, it might be reasonable to display all prices - including their individual components - within a single graph.
 
 ![alt text](images/grafana-year-of-prices.png)
 ```sql
@@ -448,7 +458,7 @@ AS $f$
         WHERE _time <@ ep.price_period
           AND _time <@ ef.fee_period
           AND ep.trade_type = _trade_type
-          AND fee_name IS DISTINCT FROM _exclude
+          AND ep.price_name IS DISTINCT FROM _exclude
     )
     SELECT COALESCE(fee_abs.val, 0) + COALESCE(fee_rel.val, 0)
     FROM fee_abs, fee_rel;
@@ -526,7 +536,7 @@ WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague') AS bucket,
     entity_id,
-    delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS value,    
+    delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS energy,    
 FROM ltss
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
@@ -540,7 +550,7 @@ WITH (timescaledb.continuous) AS
 SELECT
    time_bucket('1d'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
    entity_id,
-   SUM(value) AS value,
+   SUM(energy) AS energy,
 FROM ltss_energy_ote.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
@@ -551,22 +561,22 @@ WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1h'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
     entity_id,
-    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(value)) + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(value))
+    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy)) + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(energy))
     AS purchase_cost,
     
-    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(value), _exclude => 'Energy') + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(value), _exclude => 'Energy')
+    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy), _exclude => 'Energy') + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(energy), _exclude => 'Energy')
     AS purchase_trading_cost,
     
-    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(value), _include => 'Energy')
+    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy), _include => 'Energy')
     AS purchase_energy_cost,
     
-    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(value)) - ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(value))
+    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy)) - ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(energy))
     AS sale_income, -- net income
     
-    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(value), _exclude => 'Energy') + ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(value), _exclude => 'Energy')
+    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy), _exclude => 'Energy') + ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(energy), _exclude => 'Energy')
     AS sale_trading_cost, -- trading costs
     
-    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(value), _include => 'Energy') 
+    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy), _include => 'Energy') 
     AS sale_energy_cost -- net cost of sold energy
     
 FROM ltss_energy_ote.cagg_energy_hourly as t
@@ -701,7 +711,7 @@ src AS
                     WHEN entity_id ~ 'purchased'      THEN -1 * purchase_cost
                     WHEN entity_id ~ 'cube|mainhouse' THEN purchase_cost
                  END
-        END) AS value
+        END) AS cost
     FROM ltss_energy_ote.cagg_costs_${cagg_suffix}
     WHERE entity_id IN (
                             'sensor.energy_injected_hourly', 
@@ -715,7 +725,7 @@ src AS
 SELECT
     time,
     entityid,
-    SUM(value) OVER (PARTITION BY entityid ORDER BY time) AS value
+    SUM(cost) OVER (PARTITION BY entityid ORDER BY time) AS roi
 FROM src;
 ```
 
