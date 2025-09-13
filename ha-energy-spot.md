@@ -126,10 +126,12 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_prices
     price_name  TEXT NOT NULL,
     price_period TSTZRANGE NOT NULL,
     price_value NUMERIC NOT NULL,
+    dir INTEGER NOT NULL
     volume_unit  TEXT NOT NULL,
     CONSTRAINT pk_electricityprices PRIMARY KEY (trade_type, price_name, price_period),
     CONSTRAINT xc_electricityprices_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, price_period WITH &&),
-    CONSTRAINT ck_electricityprices_tradetype CHECK (trade_type IN ('Sale', 'Purchase'))
+    CONSTRAINT ck_electricityprices_tradetype CHECK (trade_type IN ('Sale', 'Purchase')),
+    CONSTRAINT ck_electricityprices_dir CHECK (dir IN (-1, 1))
 );
 
 
@@ -140,41 +142,29 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees_pricerel
     fee_name    TEXT NOT NULL,
     fee_period  TSTZRANGE NOT NULL,
     fee_value   NUMERIC NOT NULL,
+    dir         INTEGER NOT NULL
     CONSTRAINT pk_electricityfeespricerel PRIMARY KEY (trade_type, price_name, fee_name, fee_period),
     CONSTRAINT xc_electricityfeespricerel_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, fee_period WITH &&),
-    CONSTRAINT ck_electricityfeespricerel_tradetype CHECK (trade_type IN ('Sale', 'Purchase'))
-);
-
-CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees_volrel
-(
-    trade_type  TEXT NOT NULL,
-    fee_name    TEXT NOT NULL,
-    fee_period  TSTZRANGE NOT NULL,
-    fee_value   NUMERIC NOT NULL,
-    volume_unit    TEXT NOT NULL,
-    CONSTRAINT pk_electricityfeesvolrel PRIMARY KEY (trade_type, fee_name, fee_period),
-    CONSTRAINT xc_electricityfeesvolrel_unique EXCLUDE USING gist (trade_type WITH =, fee_name WITH =, fee_period WITH &&),
-    CONSTRAINT ck_electricityfeesvolrel_tradetype CHECK (trade_type IN ('Sale', 'Purchase'))
+    CONSTRAINT ck_electricityfeespricerel_tradetype CHECK (trade_type IN ('Sale', 'Purchase')),
+    CONSTRAINT ck_electricityfeespricerel_dir CHECK (dir IN (-1, 1))
 );
 
 COMMENT ON TABLE ltss_energy_ote.electricity_prices IS 'Net prices for an energy volume';
 
 COMMENT ON TABLE ltss_energy_ote.electricity_fees_pricerel IS 'Fees to be calculated from the net value of energy volume';
 
-COMMENT ON TABLE ltss_energy_ote.electricity_fees_volrel IS 'Fees to be calculated for volume of energy';
-
 GRANT USAGE ON SCHEMA ltss_energy_ote2 TO public;
-GRANT SELECT ON TABLE ltss_energy_ote.electricity_fees_volrel, ltss_energy_ote.electricity_fees_pricerel, ltss_energy_ote.electricity_prices TO public;
+GRANT SELECT ON TABLE ltss_energy_ote.electricity_fees_pricerel, ltss_energy_ote.electricity_prices TO public;
 ```
-The structure of the `electricity_prices` table was described earlier. The key change is that it now stores only net prices. Additionally, the `trade_type` column (formerly `price_type`) is restricted to two values: `Purchase` and `Sale`. This is enforced using a check constraint, which is also applied to related tables for consistency. The check constraint approach is chosen for its flexibility should future adjustments be needed.
+The structure of the `electricity_prices` table was described earlier. The key change is that it now stores only net prices. Additionally, the `trade_type` column (formerly `price_type`) is restricted to two values: `Purchase` and `Sale`. This is enforced using a check constraint, which is also applied to another table.
 
-It is recommended to use the name `Energy` to represent the pure electricity price (i.e., the spot price).
+Also it's recommended to reserve the `Energy` name appearing in `price_name` column to represent the pure electricity price (i.e., the spot price). 
 
 Names of entries are proposed as started with an uppercase first letter, to easthetically match other names like 'VAT' and ensuring visualization consistency in Graphana.
 
- This naming convention is used throughout the code and helps with data presentation in Grafana.
+This naming convention is used throughout the code.
 
-Fees require further explanation, as two types are supported:
+Fees table require further explanation, as two types are supported:
 
 - **Volume-based fee**: This is a fixed price per unit of energy (e.g., 250 CZK per 1 MWh). The total fee is calculated as `fee_value * energy`, independent of other factors.
 
@@ -184,20 +174,30 @@ The following example demonstrates a configuration for buying and selling at spo
 
 **price table**
 
-| trade_type | price_name   | price_period                                                   | price_value |  volume_unit |
-|------------|--------------|-------------------------------------------------------------|-------------|-----------|
-| Purchase   | CEPS              | ["2024-08-06 00:00:00+02",infinity)                     | 0.629       | kWh        |
-| Purchase   | Dan z elektriny   | ["2023-08-29 00:00:00+02",infinity)                     | 0.0283      | kWh        |
-| Purchase   | POZE              | ["2023-12-31 23:00:00+01",infinity)                     | 0.495       | kWh        |
-| Purchase   | Distribution      | ["2024-08-06 00:00:00+02","2025-01-01 00:00:00+01")     | 2.01566     | kWh        |
-| Purchase   | Distribution      | ["2025-01-01 00:00:00+01",infinity)                     | 3.2954108   | kWh        |
-| Sale       | Energy       | ["2025-01-01 00:00:00+01","2026-01-01 01:00:00+01")         | 2.855       | kWh       |
-| Purchase   | Energy       | ["2025-01-01 00:00:00+01","2026-01-01 01:00:00+01")         | 2.855       | kWh       |
-| Sale       | Energy       | ["2025-01-01 01:00:00+01","2025-01-01 02:00:00+01")         | 2.804       | kWh       |
-| Purchase   | Energy       | ["2025-01-01 01:00:00+01","2025-01-01 02:00:00+01")         | 2.804       | kWh       |
-| Sale       | Energy       | ["2025-01-01 02:00:00+01","2025-01-01 03:00:00+01")         | 2.598       | kWh       |
-| Purchase   | Energy       | ["2025-01-01 02:00:00+01","2025-01-01 03:00:00+01")         | 2.598       | kWh       |
-| ...        | ...       | ...         | ...          | kWh       |
+| trade_type | price_name    | price_period                                      | price_value |dir|volume_unit |
+|------------|---------------|---------------------------------------------------|-------------|---|------------|
+|Purchase    |Ceps           |["2023-08-29 00:00:00+02","2024-01-01 00:00:00+01")|      0.11353|  1|kWh         |
+|Purchase    |Ceps           |["2024-01-01 00:00:00+01","2025-01-01 00:00:00+01")|      0.21282|  1|kWh         |
+|Purchase    |Ceps           |["2025-01-01 00:00:00+01",infinity)                |      0.31178|  1|kWh         |
+|Purchase    |Dan Z Elektriny|["2023-08-29 00:00:00+02",infinity)                |       0.0283|  1|kWh         |
+|Purchase    |Distribution   |["2023-08-29 00:00:00+02","2024-01-01 00:00:00+01")|        1.611|  1|kWh         |
+|Purchase    |Distribution   |["2024-01-01 00:00:00+01","2024-08-06 00:00:00+02")|      2.01566|  1|kWh         |
+|Purchase    |Distribution   |["2024-08-06 00:00:00+02","2025-01-01 00:00:00+01")|      2.01566|  1|kWh         |
+|Purchase    |Distribution   |["2025-01-01 00:00:00+01",infinity)                |      2.09963|  1|kWh         |
+|Purchase    |Energy         |["2023-08-29 00:00:00+02","2023-11-01 00:00:00+01")|      4.69834|  1|kWh         |
+|Purchase    |Energy         |["2023-11-01 00:00:00+01","2024-03-20 00:00:00+01")|      4.28925|  1|kWh         |
+|Purchase    |Energy         |["2024-03-20 00:00:00+01","2024-08-01 00:00:00+02")|      3.75537|  1|kWh         |
+|Purchase    |Energy         |["2024-08-01 00:00:00+02","2026-01-01 00:00:00+01")|      2.99008|  1|kWh         |
+|Purchase    |Poze           |["2023-12-31 23:00:00+01",infinity)                |        0.495|  1|kWh         |
+|Sale        |Energy         |["2024-08-08 00:00:00+02","2025-04-01 00:00:00+02")|          1.4|  1|kWh         |
+|Sale        |Energy         |["2025-04-01 00:00:00+02","2025-06-29 00:00:00+02")|            1|  1|kWh         |
+|Sale        |Energy         |["2025-06-29 00:00:00+02","2025-11-01 00:00:00+02")|          0.5|  1|kWh         |
+|Sale        |EnerSpot       |["2025-11-01 00:00:00+02",infinity)                |         0.25| -1|kWh         |
+|Sale        |Energy         |["2025-11-01 00:00:00+02","2025-11-01 01:00:00+02")| ...         |  1|kWh         |
+| ...        | ...           | ...                                               | ...         |...|kWh         |
+
+**ToDo - describe Dir**
+**ToDo - add example for both spot sale+purchase**
 
 Notice how both sale and purchase prices for energy are recorded separately. Although the spot price itself is singular, the system must distinguish between purchase and sale transactions. This approach keeps the logic straightforward and avoids unnecessary complexity.
 
@@ -205,26 +205,21 @@ You can safely use `"infinity"` as a time boundary when the end date of a price 
 
 **price-relative fee table**
 
-This table is great for handling taxes. Also, it's applicable to handling fees deducted as percentage of energy cost rather than amount.
+This table is great for handling taxes. Also, it's applicable to handle operator fees deducted as percentage of energy cost rather than amount.
 
-| trade_type | price_name | fee_name |  fee_period                                            | fee_value |
-|------------|------------|----------|--------------------------------------------------------|-----------|
-| Purchase   | CEPS               | VAT      | (-infinity,infinity)  | 0.21      |
-| Purchase   | Dan z elektriny    | VAT      | (-infinity,infinity)  | 0.21      |
-| Purchase   | POZE               | VAT      | (-infinity,infinity)  | 0.21      |
-| Purchase   | Distribution       | VAT      | (-infinity,infinity)  | 0.21      |
-| Purchase   | Energy             | VAT      | (-infinity,infinity)  | 0.21      |
+**ToDo - describe Dir**
+
+|trade_type  |price_name     |fee_name|fee_period          |fee_value|dir|
+|------------|---------------|--------|--------------------|---------|---|
+|Purchase    |Ceps           |VAT     |(-infinity,infinity)|     0.21|  1|
+|Purchase    |Dan Z Elektriny|VAT     |(-infinity,infinity)|     0.21|  1|
+|Purchase    |Distribution   |VAT     |(-infinity,infinity)|     0.21|  1|
+|Purchase    |Energy         |VAT     |(-infinity,infinity)|     0.21|  1|
+|Purchase    |Poze           |VAT     |(-infinity,infinity)|     0.21|  1|
 
 In order to properly connect that fee with the price, `trade_type` and `price_name` have to reflect related entry from the price table.
 
 > Fees stored in price-relative fee table are units independed
-
-**volume-relative fee table**
-
-| trade_type | fee_name   | fee_period                                             | fee_value | volume_unit |
-|------------|------------|--------------------------------------------------------|-----------|----------|
-| Sale       | Energy     | ["2025-01-01 00:00:00+01",infinity)    | 0.25      | kWh      |
-
 
 > Contracts very often list prices for MWh. Tables above list kWh, however it has only informative purpose. The code bellow doesn't implement recalculation between units (not that it's not possible).It expects that **all energy entries stored in ltss table are in kWh.**
 
@@ -357,7 +352,6 @@ SELECT time as time, 1000 * SUM(price_value * COALESCE(1+efr.fee_value,1) + COAL
 FROM ltss_energy_mnd.electricity_prices AS ec
 JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 d'::INTERVAL) AS x(time) ON TRUE
 LEFT JOIN ltss_energy_mnd.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
-LEFT JOIN ltss_energy_mnd.electricity_fees_volrel AS evr ON evr.trade_type = ec.trade_type AND ec.price_period <@ evr.fee_period
 WHERE x.time <@ price_period
 group by 1, 3
 
@@ -366,7 +360,6 @@ UNION
 SELECT LOWER(price_period) AS "Time", 1000 * SUM((price_value * COALESCE(1+efr.fee_value,1) - COALESCE(evr.fee_value, 0))) AS price, ec.trade_type as type
 FROM ltss_energy_ote2.electricity_prices AS ec
 LEFT JOIN ltss_energy_ote2.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
-LEFT JOIN ltss_energy_ote2.electricity_fees_volrel AS evr ON evr.trade_type = ec.trade_type AND ec.price_period <@ evr.fee_period
 WHERE LOWER(price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
 AND (ec.trade_type, ec.price_name) IN (('sale', 'energy'))
 GROUP BY 1, 3
@@ -411,57 +404,54 @@ CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_cost
     _trade_type TEXT,
     _time       TIMESTAMPTZ,
     _value      NUMERIC,
-    _exclude    TEXT DEFAULT NULL,
-    _include    TEXT DEFAULT NULL
+    _incl_pname TEXT[] DEFAULT NULL,
+    _excl_pname TEXT[] DEFAULT NULL
 )
 RETURNS NUMERIC
-LANGUAGE 'sql'
+LANGUAGE sql
 STABLE
 AS $f$
 
     SELECT
-        trim_scale(SUM(_value * price_value)) AS val_total
-    FROM ltss_energy_ote.electricity_prices
+        trim_scale(SUM(_value * price_value * dir)) AS val_total
+    FROM ltss_energy_ote.electricity_prices AS p
     WHERE _time <@ price_period
-      AND trade_type = _trade_type
-      AND price_name IS DISTINCT FROM _exclude
-      AND price_name = COALESCE(_include, price_name)
+      AND trade_type       = _trade_type
+      AND p.price_name     = ANY(COALESCE(_incl_pname, Array[price_name]))
+	  AND NOT p.price_name = ANY(COALESCE(_excl_pname, ARRAY[]::text[]))
 
 $f$;
 
 CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_fee
 (
-    _trade_type TEXT,
-    _time       TIMESTAMPTZ,
-    _value      NUMERIC,
-    _exclude    TEXT DEFAULT NULL
+    _TRADE_TYPE TEXT,
+    _TIME       TIMESTAMPTZ,
+    _VALUE      NUMERIC,
+    _INCL_PNAME TEXT[] DEFAULT NULL,
+    _EXCL_PNAME TEXT[] DEFAULT NULL,
+    _INCL_FNAME TEXT[] DEFAULT NULL,
+    _EXCL_FNAME TEXT[] DEFAULT NULL
 )
 RETURNS NUMERIC
-LANGUAGE 'sql'
+LANGUAGE sql
 STABLE
 AS $f$
 
-    WITH
-    fee_abs AS
+    SELECT COALESCE(trim_scale(_value * SUM(value)), 0) AS value
+    FROM
     (
-        SELECT trim_scale(SUM(_value * fee_value)) AS val
-        FROM ltss_energy_ote.electricity_fees_volrel
-        WHERE _time <@ fee_period
-          AND trade_type = _trade_type
-          AND fee_name IS DISTINCT FROM _exclude
-    ),
-    fee_rel AS 
-    (
-        SELECT trim_scale(SUM(_value * price_value * fee_value)) AS val
-        FROM ltss_energy_ote.electricity_prices   AS ep
-        JOIN ltss_energy_ote.electricity_fees_pricerel AS ef ON (ep.trade_type, ep.price_name) = (ef.trade_type, ef.price_name)
-        WHERE _time <@ ep.price_period
-          AND _time <@ ef.fee_period
-          AND ep.trade_type = _trade_type
-          AND ep.price_name IS DISTINCT FROM _exclude
-    )
-    SELECT COALESCE(fee_abs.val, 0) + COALESCE(fee_rel.val, 0)
-    FROM fee_abs, fee_rel;
+        SELECT p.price_value * COALESCE((1 - public.nmul(1 - f.fee_value)), 1) AS value
+        FROM ltss_Energy_ote.electricity_prices AS p
+        JOIN ltss_Energy_ote.electricity_fees   AS f ON (p.trade_type, p.price_name) = (f.trade_type, f.price_name)
+        WHERE _time <@ p.price_period
+          AND _time <@ f.fee_period
+          AND p.trade_type      = _trade_type
+          AND p.price_name      = ANY(COALESCE(_incl_pname, Array[p.price_name]))
+          AND NOT p.price_name  = ANY(COALESCE(_excl_pname, Array[]::TEXT[]))
+          AND f.fee_name        = ANY(COALESCE(_incl_fname, Array[f.fee_name]))
+          AND NOT f.fee_name    = ANY(COALESCE(_excl_fname, Array[]::TEXT[]))
+        GROUP BY p.trade_type, p.price_name, p.price_period, p.price_value
+    ) AS sub
 
 $f$;
 
@@ -558,6 +548,32 @@ WITH NO DATA;
 
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_costs_hourly
 WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1h'::interval, bucket, 'Europe/Prague') AS bucket,
+    entity_id,
+
+    ltss_energy_ote.calculate_cost('Purchase', max(bucket), sum(energy)) + ltss_energy_ote.calculate_fee('Purchase', max(bucket), sum(energy))
+    AS purchase_cost,
+
+    ltss_energy_ote.calculate_cost('Purchase', max(bucket), sum(energy), _excl_pname => ARRAY['Energy']) + ltss_energy_ote.calculate_fee('Purchase', max(bucket), sum(energy), _excl_pname => ARRAY['Energy'])
+    AS purchase_trading_cost,
+
+    ltss_energy_ote.calculate_cost('Purchase', max(bucket), sum(energy), _incl_pname => ARRAY['Energy'])
+    AS purchase_energy_cost,
+    
+    ltss_energy_ote.calculate_cost('Sale', max(bucket), sum(energy)) - ltss_energy_ote.calculate_fee('Sale', max(bucket), sum(energy))
+    AS sale_income,
+    
+    ltss_energy_ote.calculate_cost('Sale', max(bucket), sum(energy), _excl_pname => ARRAY['Energy']) + ltss_energy_ote.calculate_fee('Sale', max(bucket), sum(energy), _excl_pname => ARRAY['Energy'])
+    AS sale_trading_cost,
+
+    ltss_energy_ote.calculate_cost('Sale', max(bucket), sum(energy), _incl_pname => ARRAY['Energy'])
+    AS sale_energy_cost
+
+FROM ltss_energy_ote.cagg_energy_hourly
+WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_costs())
+GROUP BY 1, 2;
+
 SELECT
     time_bucket('1h'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
     entity_id,
