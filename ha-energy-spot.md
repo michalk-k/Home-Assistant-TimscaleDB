@@ -143,7 +143,6 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees_pricerel
     CONSTRAINT pk_electricityfeespricerel PRIMARY KEY (trade_type, price_name, fee_name, fee_period),
     CONSTRAINT xc_electricityfeespricerel_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, fee_period WITH &&),
     CONSTRAINT ck_electricityfeespricerel_tradetype CHECK (trade_type IN ('Sale', 'Purchase'))
---    CONSTRAINT fk_electricityfeespricerel_prices FOREIGN KEY (trade_type, price_name) REFERENCES ltss_energy_ote.electricity_prices (trade_type, price_name)
 );
 
 CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees_volrel
@@ -354,21 +353,22 @@ For improved performance, code clarity, and reusability, construct individual qu
 
 
 ```sql
-SELECT x.time, SUM(1000 * price_value * COALESCE(1+fee_value,1)) AS price, ec.trade_type AS type
-FROM ltss_energy_ote.electricity_prices AS ec
-JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1d'::INTERVAL) AS x(time) ON TRUE
-LEFT JOIN ltss_energy_ote.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+SELECT time as time, 1000 * SUM(price_value * COALESCE(1+efr.fee_value,1) + COALESCE(evr.fee_value, 0)) AS price, ec.trade_type  as type
+FROM ltss_energy_mnd.electricity_prices AS ec
+JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 d'::INTERVAL) AS x(time) ON TRUE
+LEFT JOIN ltss_energy_mnd.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+LEFT JOIN ltss_energy_mnd.electricity_fees_volrel AS evr ON evr.trade_type = ec.trade_type AND ec.price_period <@ evr.fee_period
 WHERE x.time <@ price_period
-AND NOT (ec.trade_type, ec.price_name) IN (('Sale', 'Energy'))
-GROUP BY 1, 3
+group by 1, 3
 
-UNION ALL
+UNION
 
-SELECT LOWER(price_period) AS time, SUM(1000 * price_value * COALESCE(1+fee_value,1)) AS price, ec.trade_type AS type
-FROM ltss_energy_ote.electricity_prices AS ec
-LEFT JOIN ltss_energy_ote.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+SELECT LOWER(price_period) AS "Time", 1000 * SUM((price_value * COALESCE(1+efr.fee_value,1) - COALESCE(evr.fee_value, 0))) AS price, ec.trade_type as type
+FROM ltss_energy_ote2.electricity_prices AS ec
+LEFT JOIN ltss_energy_ote2.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+LEFT JOIN ltss_energy_ote2.electricity_fees_volrel AS evr ON evr.trade_type = ec.trade_type AND ec.price_period <@ evr.fee_period
 WHERE LOWER(price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
-AND (ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND 
+AND (ec.trade_type, ec.price_name) IN (('sale', 'energy'))
 GROUP BY 1, 3
 ORDER BY type DESC
 ```
