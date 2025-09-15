@@ -8,9 +8,9 @@ A future update will merge both articles into a comprehensive guide, incorporati
 
 > The new approach is well-suited for environments with infrequently changing prices and is recommended for new deployments.
 
-All objects are created in a dedicated schema, named `ltss_energy_ote`. If you have existing objects from the previous version, this allows both setups to coexist without conflict.
+Because turned into more changed than expected, the proposal is to create all objects again in a new dedicated schema. If you have existing objects from the previous version, this allows both setups to coexist without conflict. When ready you will be able to migrate data. Look at the end of the article for queries helping the migration.
 
-The `ote` suffix refers to the spot price operator in the Czech Republic, but you may use any suffix that fits your context.
+In the following examples all objects will be put in `ltss_energy_ote` schema. The `ote` suffix refers to the spot price operator in the Czech Republic, but you may use any suffix that fits your context. 
 
 The diagram below illustrates involved components and objects to be created. Related tables and views are grouped within rectangles, and arrows indicate the direction of data flow.
 
@@ -18,12 +18,11 @@ The diagram below illustrates involved components and objects to be created. Rel
 flowchart LR
 
     subgraph Postgresql
-        style Postgresql fill:transparent
-        style HA fill:transparent
+        style Postgresql fill:lightgray
+        style HA fill:lightgray
 
         t_prices@{ shape: bow-rect, label: "electricity_prices" }
-        t_feesp@{ shape: bow-rect, label: "electricity_fees_pricerel" }
-        t_feesv@{ shape: bow-rect, label: "electricity_fees_volrel" }
+        t_feesp@{ shape: bow-rect, label: "electricity_rates" }
 
         f_costs@{ shape: rect, label: "calculate_cost()" }
         f_fees@{ shape: rect, label: "calculate_fees()" }
@@ -83,33 +82,30 @@ flowchart LR
     t_prices-->f_costs
     t_prices-->f_fees
     t_feesp-->f_fees
-    t_feesv-->f_fees
 ```
 
 The overall approach remains similar to the previous article, but introduces two important changes:
 
-**1. Fees and Taxes Handling**  
-When trading on the spot market via a third-party operator, fees are typically billed in one of two ways:
-* a fixed price per energy unit (e.g., 250 CZK per 1 MWh)
-* a percentage of the energy price (e.g., 15% of the sold energy price, commonly used for taxes)
+**1. Separate CAGGs for Energy and Costs**  
+Previous article describes way of materializing energy, whle costs were calculated on-the-fly during visualization. It leads perfomance load, apparent more and more with increasing amount of data and calculation complexity. Materializing costs in dedicated CAGGs optimizes query performance so important on resource-constrained hardware like Raspberry Pi. 
 
-This guide supports both billing methods. Since spot pricing involves a single net price, fees and taxes are applied based on the trade type (sale or purchase). Therefore, energy prices should be stored as net values.
-
-> Note: Price and fee entries must be created in the database in advance of incoming energy data. While spot prices can be delivered automatically, many fees and static prices require manual entry, as automated retrieval via API is uncommon.
-
-**2. Separate CAGGs for Energy and Costs**  
-Materializing costs in dedicated Continuous Aggregates (CAGGs) improves query performance, especially on resource-constrained hardware like Raspberry Pi. Separating energy and cost CAGGs offers several advantages:
+While both energy and costs could be materialized by the single CAGG, separating them offers several advantages:
 
 1. You can adjust prices retroactively and regenerate cost CAGGs, even if the original data is no longer present in the `ltss` table.
 2. Additional energy-related CAGGs can be created later, leveraging the precalculated energy aggregates.
 3. The energy CAGG can aggregate all energy sensors, while the cost CAGG can focus on a subset of sensors.
 4. The codebase remains cleaner and easier to maintain.
 
-Cost CAGGs will provide sale and purchase metrics for each measured energy source, along with net and uplifting values to support future analysis.
+**1. Net and fees (ie Taxes)**
+When trading on the spot market, prices are provided in net value. Depending on contract and other regulations some additional costs add added over the top of net price:
+* a fixed price per energy unit (e.g., 250 CZK per 1 MWh). It might be handling fee for a trading company, costs of distribution or other ones defined by goverment 
+* a percentage of the energy price (e.g., 15% of the sold energy price). It might be taxes or another way of calculating the handling fee for a trading copany
 
 ## Prices
 
-Tax application depends on local regulations; for example, VAT may be added to purchased energy but not deducted from sold energy. As a result, the `electricity_prices` table should contain only net energy prices, while taxes and fees are managed in separate tables.
+This guide supports both billing methods. The `electricity_prices` table carries net prices for a volume, while `electricity_fees` contains price rates. Both allows to satisfy different use-cases, like buying for fixed prices, selling on spot, or surfing on the spot. Applying taxes only to selected operations.
+
+> Note: Price and fee entries must be created in the database in advance of incoming energy data. While spot prices can be delivered automatically, many fees and static prices require manual entry, as automated retrieval via API is uncommon.
 
 ### Data Structures
 
@@ -135,7 +131,7 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_prices
 );
 
 
-CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees_pricerel
+CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_rates
 (
     trade_type  TEXT NOT NULL CHECK (trade_type IN ('Sale', 'Purchase')),
     price_name  TEXT NOT NULL,
@@ -151,28 +147,24 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees_pricerel
 
 COMMENT ON TABLE ltss_energy_ote.electricity_prices IS 'Net prices for an energy volume';
 
-COMMENT ON TABLE ltss_energy_ote.electricity_fees_pricerel IS 'Fees to be calculated from the net value of energy volume';
+COMMENT ON TABLE ltss_energy_ote.electricity_rates IS 'Fees to be calculated from the net value of energy volume';
 
 GRANT USAGE ON SCHEMA ltss_energy_ote2 TO public;
-GRANT SELECT ON TABLE ltss_energy_ote.electricity_fees_pricerel, ltss_energy_ote.electricity_prices TO public;
+GRANT SELECT ON TABLE ltss_energy_ote.electricity_rates, ltss_energy_ote.electricity_prices TO public;
 ```
-The structure of the `electricity_prices` table was described earlier. The key change is that it now stores only net prices. Additionally, the `trade_type` column (formerly `price_type`) is restricted to two values: `Purchase` and `Sale`. This is enforced using a check constraint, which is also applied to another table.
 
-Also it's recommended to reserve the `Energy` name appearing in `price_name` column to represent the pure electricity price (i.e., the spot price). 
+
+> Contracts very often list prices for MWh. Tables below list kWh, however it has only informative purpose. The code bellow doesn't implement recalculation between units (not that it's impossible). It expects that **all energy entries stored in `ltss` table are in kWh.**
+
+**price table**
+
+The `electricity_prices` table carries the price defined as combination of trade type, price name, time period and the value. The `trade_type` is restricted to two values: `Purchase` and `Sale`. This is enforced using a check constraint. While price name can be anything, I reserve the `Energy` value to represent the pure electricity price (i.e., the spot price). 
 
 Names of entries are proposed as started with an uppercase first letter, to easthetically match other names like 'VAT' and ensuring visualization consistency in Graphana.
 
-This naming convention is used throughout the code.
+Estabilishing these names at this point has key meaning, because later on some names will be used in the code.
 
-Fees table require further explanation, as two types are supported:
-
-- **Volume-based fee**: This is a fixed price per unit of energy (e.g., 250 CZK per 1 MWh). The total fee is calculated as `fee_value * energy`, independent of other factors.
-
-- **Price-relative fee**: This fee is a percentage of the net price (commonly used for taxes such as VAT). The calculation is `energy * (1+fee_value) * price_value`, where `price_value` is taken from the `electricity_prices` table. The `electricity_fees_pricerel` table links to the prices table via the `trade_type` and `price_name` columns. Notably, this relationship is not enforced by a foreign key constraint, allowing fee/tax periods to be defined independently from price ranges, including open-ended periods like `(-infinity, infinity)`.
-
-The following example demonstrates a configuration for buying and selling at spot prices, with additional distribution costs and VAT for purchased energy, and a fixed fee for exported energy.
-
-**price table**
+Here is an example of my price settting. I was purchasing and salleing till 11th November. Since this time I'm recording spot prices for sale.
 
 | trade_type | price_name    | price_period                                      | price_value |dir|volume_unit |
 |------------|---------------|---------------------------------------------------|-------------|---|------------|
@@ -196,18 +188,17 @@ The following example demonstrates a configuration for buying and selling at spo
 |Sale        |Energy         |["2025-11-01 00:00:00+02","2025-11-01 01:00:00+02")| ...         |  1|kWh         |
 | ...        | ...           | ...                                               | ...         |...|kWh         |
 
-**ToDo - describe Dir**
-**ToDo - add example for both spot sale+purchase**
+You might notice a fee for EnerSpot, making 250CZK for each 1MWh. It has `dir` set to `-1`. The dir sets the direction of the operation against Energy. In turn it means that earnings from energy sale will be decreased by this fee.
 
-Notice how both sale and purchase prices for energy are recorded separately. Although the spot price itself is singular, the system must distinguish between purchase and sale transactions. This approach keeps the logic straightforward and avoids unnecessary complexity.
+The model provides option to surf on spot: purchase and sale on spot. Example of such setting are mentioned later in the article.
 
-You can safely use `"infinity"` as a time boundary when the end date of a price period is not known. Open-ended periods can be defined with `-infinity` or `infinity`. When a price changes, update the entry to set the new time boundary. If you make this change before new data arrives, no further action is required. However, if you modify time boundaries for past periods, you must recalculate the cost CAGGs to update the data.
+**electricity rates**
 
-**price-relative fee table**
+This is for fees being a percentage of the net price (commonly used for taxes such as VAT). The basic formula is `energy * fee_value * price_value`, where `price_value` comes from the `electricity_prices` table. To make the relationship available, The`electricity_rates` table entries have to refer values from prices by a paid of `trade_type` and `price_name` columns. Notably, this relationship is not enforced by a foreign key constraint. It's intentional, to make possible maintaining prices and fees time periods in independent way.
+It makes possible to set like VAT for forever by using `(-infinity, infinity)` range. The drawback is, that a user has to take care about naming validity.
 
-This table is great for handling taxes. Also, it's applicable to handle operator fees deducted as percentage of energy cost rather than amount.
+The following example demonstrates a configuration of the VAT applicable for me:
 
-**ToDo - describe Dir**
 
 |trade_type  |price_name     |fee_name|fee_period          |fee_value|dir|
 |------------|---------------|--------|--------------------|---------|---|
@@ -217,11 +208,14 @@ This table is great for handling taxes. Also, it's applicable to handle operator
 |Purchase    |Energy         |VAT     |(-infinity,infinity)|     0.21|  1|
 |Purchase    |Poze           |VAT     |(-infinity,infinity)|     0.21|  1|
 
-In order to properly connect that fee with the price, `trade_type` and `price_name` have to reflect related entry from the price table.
+**ToDo - describe Dir**
+**ToDo - add example for both spot sale+purchase**
 
-> Fees stored in price-relative fee table are units independed
+Notice how both sale and purchase prices for energy are recorded separately. Although the spot price itself is singular, the system must distinguish between purchase and sale transactions. This approach keeps the logic straightforward and avoids unnecessary complexity.
 
-> Contracts very often list prices for MWh. Tables above list kWh, however it has only informative purpose. The code bellow doesn't implement recalculation between units (not that it's not possible).It expects that **all energy entries stored in ltss table are in kWh.**
+You can safely use `"infinity"` as a time boundary when the end date of a price period is not known. Open-ended periods can be defined with `-infinity` or `infinity`. When a price changes, update the entry to set the new time boundary. If you make this change before new data arrives, no further action is required. However, if you modify time boundaries for past periods, you must recalculate the cost CAGGs to update the data.
+
+
 
 ### Feeding with data
 
@@ -351,7 +345,7 @@ For improved performance, code clarity, and reusability, construct individual qu
 SELECT time as time, 1000 * SUM(price_value * COALESCE(1+efr.fee_value,1) + COALESCE(evr.fee_value, 0)) AS price, ec.trade_type  as type
 FROM ltss_energy_mnd.electricity_prices AS ec
 JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 d'::INTERVAL) AS x(time) ON TRUE
-LEFT JOIN ltss_energy_mnd.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+LEFT JOIN ltss_energy_mnd.electricity_rates AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE x.time <@ price_period
 group by 1, 3
 
@@ -359,7 +353,7 @@ UNION
 
 SELECT LOWER(price_period) AS "Time", 1000 * SUM((price_value * COALESCE(1+efr.fee_value,1) - COALESCE(evr.fee_value, 0))) AS price, ec.trade_type as type
 FROM ltss_energy_ote2.electricity_prices AS ec
-LEFT JOIN ltss_energy_ote2.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+LEFT JOIN ltss_energy_ote2.electricity_rates AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE LOWER(price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
 AND (ec.trade_type, ec.price_name) IN (('sale', 'energy'))
 GROUP BY 1, 3
@@ -384,7 +378,7 @@ If you do not use periodically recorded prices, you can omit the second subquery
 SELECT x.time, 1000 * price_value * COALESCE(1+fee_value,1) AS price, format('%s (%s)', ec.trade_type, ec.price_name) AS type
 FROM ltss_energy_ote.electricity_prices AS ec
 JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1d'::INTERVAL) AS x(time) ON TRUE
-LEFT JOIN ltss_energy_ote.electricity_fees_pricerel AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+LEFT JOIN ltss_energy_ote.electricity_rates AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE x.time <@ price_period
 ORDER BY type DESC
 ```
@@ -571,31 +565,6 @@ SELECT
     AS sale_energy_cost
 
 FROM ltss_energy_ote.cagg_energy_hourly
-WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_costs())
-GROUP BY 1, 2;
-
-SELECT
-    time_bucket('1h'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
-    entity_id,
-    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy)) + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(energy))
-    AS purchase_cost,
-    
-    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy), _exclude => 'Energy') + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(energy), _exclude => 'Energy')
-    AS purchase_trading_cost,
-    
-    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy), _include => 'Energy')
-    AS purchase_energy_cost,
-    
-    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy)) - ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(energy))
-    AS sale_income, -- net income
-    
-    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy), _exclude => 'Energy') + ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(energy), _exclude => 'Energy')
-    AS sale_trading_cost, -- trading costs
-    
-    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy), _include => 'Energy') 
-    AS sale_energy_cost -- net cost of sold energy
-    
-FROM ltss_energy_ote.cagg_energy_hourly as t
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_costs())
 GROUP BY 1, 2
 WITH NO DATA;
