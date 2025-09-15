@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_prices
 
 CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_rates
 (
-    trade_type  TEXT NOT NULL CHECK (trade_type IN ('Sale', 'Purchase')),
+    trade_type  TEXT NOT NULL,
     price_name  TEXT NOT NULL,
     fee_name    TEXT NOT NULL,
     fee_period  TSTZRANGE NOT NULL,
@@ -149,12 +149,12 @@ COMMENT ON TABLE ltss_energy_ote.electricity_prices IS 'Net prices for an energy
 
 COMMENT ON TABLE ltss_energy_ote.electricity_rates IS 'Fees to be calculated from the net value of energy volume';
 
-GRANT USAGE ON SCHEMA ltss_energy_ote2 TO public;
+GRANT USAGE ON SCHEMA ltss_energy_ote TO public;
 GRANT SELECT ON TABLE ltss_energy_ote.electricity_rates, ltss_energy_ote.electricity_prices TO public;
 ```
 
 
-> Contracts very often list prices for MWh. Tables below list kWh, however it has only informative purpose. The code bellow doesn't implement recalculation between units (not that it's impossible). It expects that **all energy entries stored in `ltss` table are in kWh.**
+> It's common that contracts list prices in MWh. Tables below list kWh, however it has only informative purpose. The code bellow doesn't implement recalculation between units (not that it's impossible). It expects that **all energy entries stored in `ltss` table are in kWh.**
 
 **price table**
 
@@ -273,7 +273,7 @@ BEGIN
     )
     SELECT 
         unnest(TRADES),
-        'energy',
+        'Energy',
         tstzrange((j->>'time')::TIMESTAMPTZ, (j->>'time')::TIMESTAMPTZ + '1h'::INTERVAL, '[)'),
         (j->'price')::NUMERIC,
         'kWh'
@@ -342,20 +342,21 @@ For improved performance, code clarity, and reusability, construct individual qu
 
 
 ```sql
-SELECT time as time, 1000 * SUM(price_value * COALESCE(1+efr.fee_value,1) + COALESCE(evr.fee_value, 0)) AS price, ec.trade_type  as type
-FROM ltss_energy_mnd.electricity_prices AS ec
-JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 d'::INTERVAL) AS x(time) ON TRUE
-LEFT JOIN ltss_energy_mnd.electricity_rates AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+SELECT x.time, SUM(1000 * price_value * COALESCE(1+fee_value,1)) AS price, ec.trade_type AS type
+FROM ltss_energy_ote.electricity_prices AS ec
+JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1d'::INTERVAL) AS x(time) ON TRUE
+LEFT JOIN ltss_energy_ote.electricity_fees AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE x.time <@ price_period
-group by 1, 3
+AND NOT (ec.trade_type, ec.price_name) IN (('Sale', 'Energy'))
+GROUP BY 1, 3
 
-UNION
+UNION ALL
 
-SELECT LOWER(price_period) AS "Time", 1000 * SUM((price_value * COALESCE(1+efr.fee_value,1) - COALESCE(evr.fee_value, 0))) AS price, ec.trade_type as type
-FROM ltss_energy_ote2.electricity_prices AS ec
-LEFT JOIN ltss_energy_ote2.electricity_rates AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+SELECT LOWER(price_period) AS time, SUM(1000 * price_value * COALESCE(1+fee_value,1)) AS price, ec.trade_type AS type
+FROM ltss_energy_ote.electricity_prices AS ec
+LEFT JOIN ltss_energy_ote.electricity_fees AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE LOWER(price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
-AND (ec.trade_type, ec.price_name) IN (('sale', 'energy'))
+AND (ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND 
 GROUP BY 1, 3
 ORDER BY type DESC
 ```
@@ -393,6 +394,11 @@ Additionally, the utility functions `get_entities_for_cagg_energy()` and `get_en
 > Note: If you are using TimescaleDB prior to v2.20, you must change the function declaration from STABLE to IMMUTABLE. Otherwise, PostgreSQL will reject the CAGG creation. This workaround is suitable for this scenario, but declaring non-immutable code as IMMUTABLE is generally discouraged and may cause unexpected behavior.
 
 ```sql
+CREATE OR REPLACE AGGREGATE public.nmul(numeric) (
+	SFUNC = numeric_mul,
+	STYPE = numeric
+);
+
 CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_cost
 (
     _trade_type TEXT,
@@ -416,15 +422,16 @@ AS $f$
 
 $f$;
 
+
 CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_fee
 (
-    _TRADE_TYPE TEXT,
-    _TIME       TIMESTAMPTZ,
-    _VALUE      NUMERIC,
-    _INCL_PNAME TEXT[] DEFAULT NULL,
-    _EXCL_PNAME TEXT[] DEFAULT NULL,
-    _INCL_FNAME TEXT[] DEFAULT NULL,
-    _EXCL_FNAME TEXT[] DEFAULT NULL
+	_trade_type TEXT,
+	_time       TIMESTAMPTZ,
+	_value      NUMERIC,
+	_incl_pname TEXT[] DEFAULT NULL,
+	_excl_pname TEXT[] DEFAULT NULL,
+	_incl_fname TEXT[] DEFAULT NULL,
+	_excl_fname TEXT[] DEFAULT NULL
 )
 RETURNS NUMERIC
 LANGUAGE sql
@@ -440,10 +447,10 @@ AS $f$
         WHERE _time <@ p.price_period
           AND _time <@ f.fee_period
           AND p.trade_type      = _trade_type
-          AND p.price_name      = ANY(COALESCE(_incl_pname, Array[p.price_name]))
-          AND NOT p.price_name  = ANY(COALESCE(_excl_pname, Array[]::TEXT[]))
-          AND f.fee_name        = ANY(COALESCE(_incl_fname, Array[f.fee_name]))
-          AND NOT f.fee_name    = ANY(COALESCE(_excl_fname, Array[]::TEXT[]))
+          AND p.price_name      = ANY(COALESCE(_incl_pname, ARRAY[p.price_name]))
+          AND NOT p.price_name  = ANY(COALESCE(_excl_pname, ARRAY[]::TEXT[]))
+          AND f.fee_name        = ANY(COALESCE(_incl_fname, ARRAY[f.fee_name]))
+          AND NOT f.fee_name    = ANY(COALESCE(_excl_fname, ARRAY[]::TEXT[]))
         GROUP BY p.trade_type, p.price_name, p.price_period, p.price_value
     ) AS sub
 
@@ -483,7 +490,7 @@ AS $f$
            'sensor.pg_mainhouse_total_energy_energy_hourly', -- consumption
            'sensor.pg_cube_total_energy_energy_hourly',      -- consumption
            'sensor.energy_injected_hourly',                  -- injected to grid
-           'sensor.energy_purchased_hourly',                 -- purchased from grid
+           'sensor.energy_purchased_hourly'                  -- purchased from grid
        ];
 $f$;
 ```
@@ -520,13 +527,12 @@ WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1h'::INTERVAL, "time", 'Europe/Prague') AS bucket,
     entity_id,
-    delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS energy,    
+    delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS energy   
 FROM ltss
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy())
   AND state NOT IN ('unavailable', 'unknown')
 GROUP BY 1, 2
 WITH NO DATA;
-
 
 -- create daily CAGG based on hourly one
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_daily
@@ -534,36 +540,34 @@ WITH (timescaledb.continuous) AS
 SELECT
    time_bucket('1d'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
    entity_id,
-   SUM(energy) AS energy,
+   SUM(energy) AS energy
 FROM ltss_energy_ote.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
 
-
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_costs_hourly
 WITH (timescaledb.continuous) AS
 SELECT
-    time_bucket('1h'::interval, bucket, 'Europe/Prague') AS bucket,
+    time_bucket('1h'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
     entity_id,
-
-    ltss_energy_ote.calculate_cost('Purchase', max(bucket), sum(energy)) + ltss_energy_ote.calculate_fee('Purchase', max(bucket), sum(energy))
+    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy)) + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(energy))
     AS purchase_cost,
-
-    ltss_energy_ote.calculate_cost('Purchase', max(bucket), sum(energy), _excl_pname => ARRAY['Energy']) + ltss_energy_ote.calculate_fee('Purchase', max(bucket), sum(energy), _excl_pname => ARRAY['Energy'])
+    
+    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy), _excl_pname => Array['Energy']) + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(energy), _excl_pname => Array['Energy'])
     AS purchase_trading_cost,
-
-    ltss_energy_ote.calculate_cost('Purchase', max(bucket), sum(energy), _incl_pname => ARRAY['Energy'])
+    
+    ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy), _incl_pname => Array['Energy'])
     AS purchase_energy_cost,
     
-    ltss_energy_ote.calculate_cost('Sale', max(bucket), sum(energy)) - ltss_energy_ote.calculate_fee('Sale', max(bucket), sum(energy))
-    AS sale_income,
+    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy)) - ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(energy))
+    AS sale_income, -- net income
     
-    ltss_energy_ote.calculate_cost('Sale', max(bucket), sum(energy), _excl_pname => ARRAY['Energy']) + ltss_energy_ote.calculate_fee('Sale', max(bucket), sum(energy), _excl_pname => ARRAY['Energy'])
-    AS sale_trading_cost,
-
-    ltss_energy_ote.calculate_cost('Sale', max(bucket), sum(energy), _incl_pname => ARRAY['Energy'])
-    AS sale_energy_cost
-
+    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy), _excl_pname => Array['Energy']) + ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(energy), _excl_pname => Array['Energy'])
+    AS sale_trading_cost, -- trading costs
+    
+    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy), _incl_pname => Array['Energy']) 
+    AS sale_energy_cost -- net cost of sold energy
+    
 FROM ltss_energy_ote.cagg_energy_hourly
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_costs())
 GROUP BY 1, 2
@@ -632,11 +636,11 @@ As explained previously, `WITH NO DATA` means CAGGs are not filled at creation. 
 To populate CAGGs with historical data from the `ltss` table, run the refresh procedures - hourly energy first, daily CAGGs last. Avoid overlapping the requested update time range with the scheduled update interval. For example, if the policy interval is `4h to 5m before NOW`, the upper time boundary for the refresh should not exceed NOW()-4h.
 
 ```sql
-CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_hourly', '2025-01-01 0:0', NOW()-'5h'::INTERVAL, TRUE);
-CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_daily', '2025-01-01 0:0', NOW()-'4d'::INTERVAL, TRUE);
+CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_hourly', NULL, NOW()-'5h'::INTERVAL, TRUE);
+CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_energy_daily', NULL, NOW()-'4d'::INTERVAL, TRUE);
 
-CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_costs_hourly', '2025-01-01 0:0', NOW()-'5h'::INTERVAL, TRUE);
-CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_costs_daily', '2025-01-01 0:0', NOW()-'4d'::INTERVAL, TRUE);
+CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_costs_hourly', NULL, NOW()-'5h'::INTERVAL, TRUE);
+CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_costs_daily', NULL, NOW()-'4d'::INTERVAL, TRUE);
 ```
 
 > :exclamation: **Important:** Do not run `refresh_continuous_aggregate()` for the first level CAGG (the one reading from ltss table) on missing data if their aggregated form already exists in CAGGs. Doing so will irreversibly delete them from the CAGG!
