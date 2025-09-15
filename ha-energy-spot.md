@@ -2,9 +2,9 @@
 
 This guide explains how to create the necessary database objects for tracking energy usage and its associated costs. It introduces tables for storing prices, fees, and taxes, along with methods for collecting long-term energy and cost data.
 
-Originally intended as a simple extension to the previous article to support spot prices, this update revealed additional challenges and required more significant changes than expected. As a result, new price tables and continuous aggregates (CAGGs) are introduced, along with improved naming conventions to better reflect their purpose.
+Originally intended as a simple extension to the previous article to support spot prices, this update revealed additional challenges and required more significant changes than expected. As a result, it turned into more like database project rather than tool for every-day Home Assistant user.
 
-A future update will merge both articles into a comprehensive guide, incorporating the latest TimescaleDB syntax.
+Also, comparing to previous article, this one proposes completely new model of CAGGs as well as suporting tables along with improved naming conventions to better reflect their purpose. A future update will merge both articles into a comprehensive guide, incorporating the latest TimescaleDB syntax.
 
 > The new approach is well-suited for environments with infrequently changing prices and is recommended for new deployments.
 
@@ -156,21 +156,21 @@ GRANT SELECT ON TABLE ltss_energy_ote.electricity_rates, ltss_energy_ote.electri
 
 > It's common that contracts list prices in MWh. Tables below list kWh, however it has only informative purpose. The code bellow doesn't implement recalculation between units (not that it's impossible). It expects that **all energy entries stored in `ltss` table are in kWh.**
 
-**price table**
+#### Pricing table
 
-The `electricity_prices` table carries the price defined as combination of trade type, price name, time period and the value. The `trade_type` is restricted to two values: `Purchase` and `Sale`. This is enforced using a check constraint. While price name can be anything, I reserve the `Energy` value to represent the pure electricity price (i.e., the spot price). 
+The `electricity_prices` table carries the price defined as combination of trade type, price name, time period and the value. The `trade_type` is restricted to two values: `Purchase` and `Sale`. This is enforced using a check constraint. While price name can be anything, I reserved the `Energy` value to represent the pure electricity price (i.e., the spot price). 
 
 Names of entries are proposed as started with an uppercase first letter, to easthetically match other names like 'VAT' and ensuring visualization consistency in Graphana.
 
-Estabilishing these names at this point has key meaning, because later on some names will be used in the code.
+Estabilishing these names at this point has key meaning, because some of name will be used in the code.
 
 Here is an example of my price settting. I was purchasing and salleing till 11th November. Since this time I'm recording spot prices for sale.
 
 | trade_type | price_name    | price_period                                      | price_value |dir|volume_unit |
 |------------|---------------|---------------------------------------------------|-------------|---|------------|
-|Purchase    |Ceps           |["2023-08-29 00:00:00+02","2024-01-01 00:00:00+01")|      0.11353|  1|kWh         |
-|Purchase    |Ceps           |["2024-01-01 00:00:00+01","2025-01-01 00:00:00+01")|      0.21282|  1|kWh         |
-|Purchase    |Ceps           |["2025-01-01 00:00:00+01",infinity)                |      0.31178|  1|kWh         |
+|Purchase    |CEPS           |["2023-08-29 00:00:00+02","2024-01-01 00:00:00+01")|      0.11353|  1|kWh         |
+|Purchase    |CEPS           |["2024-01-01 00:00:00+01","2025-01-01 00:00:00+01")|      0.21282|  1|kWh         |
+|Purchase    |CEPS           |["2025-01-01 00:00:00+01",infinity)                |      0.31178|  1|kWh         |
 |Purchase    |Dan Z Elektriny|["2023-08-29 00:00:00+02",infinity)                |       0.0283|  1|kWh         |
 |Purchase    |Distribution   |["2023-08-29 00:00:00+02","2024-01-01 00:00:00+01")|        1.611|  1|kWh         |
 |Purchase    |Distribution   |["2024-01-01 00:00:00+01","2024-08-06 00:00:00+02")|      2.01566|  1|kWh         |
@@ -180,42 +180,53 @@ Here is an example of my price settting. I was purchasing and salleing till 11th
 |Purchase    |Energy         |["2023-11-01 00:00:00+01","2024-03-20 00:00:00+01")|      4.28925|  1|kWh         |
 |Purchase    |Energy         |["2024-03-20 00:00:00+01","2024-08-01 00:00:00+02")|      3.75537|  1|kWh         |
 |Purchase    |Energy         |["2024-08-01 00:00:00+02","2026-01-01 00:00:00+01")|      2.99008|  1|kWh         |
-|Purchase    |Poze           |["2023-12-31 23:00:00+01",infinity)                |        0.495|  1|kWh         |
+|Purchase    |POZE           |["2023-12-31 23:00:00+01",infinity)                |        0.495|  1|kWh         |
 |Sale        |Energy         |["2024-08-08 00:00:00+02","2025-04-01 00:00:00+02")|          1.4|  1|kWh         |
 |Sale        |Energy         |["2025-04-01 00:00:00+02","2025-06-29 00:00:00+02")|            1|  1|kWh         |
 |Sale        |Energy         |["2025-06-29 00:00:00+02","2025-11-01 00:00:00+02")|          0.5|  1|kWh         |
 |Sale        |EnerSpot       |["2025-11-01 00:00:00+02",infinity)                |         0.25| -1|kWh         |
 |Sale        |Energy         |["2025-11-01 00:00:00+02","2025-11-01 01:00:00+02")| ...         |  1|kWh         |
+|Sale        |Energy         |["2025-11-01 00:01:00+02","2025-11-01 02:00:00+02")| ...         |  1|kWh         |
+|Sale        |Energy         |["2025-11-01 00:02:00+02","2025-11-01 03:00:00+02")| ...         |  1|kWh         |
 | ...        | ...           | ...                                               | ...         |...|kWh         |
 
-You might notice a fee for EnerSpot, making 250CZK for each 1MWh. It has `dir` set to `-1`. The dir sets the direction of the operation against Energy. In turn it means that earnings from energy sale will be decreased by this fee.
+You might notice a record named EnerSpot. It correlates with a breaking point when I started to to sell for spot prices. The operator is requesting a 250CZK / 1MWh fee for this operation. To be able to cover calculation of both: purchasing cost and income with use of a single formula, I estabilished the `dir` attribute. The math is as easy as it can be: `dir=1` adds value to, while `dir=-1` deducts values from the sum. 
 
-The model provides option to surf on spot: purchase and sale on spot. Example of such setting are mentioned later in the article.
+If you surf on the Spot, meaning you are purchasing and saling with spot prices, the prices have to be recorded into the table for sale and purchase. Which could look like this:
 
-**electricity rates**
+| trade_type | price_name    | price_period                                      | price_value |dir|volume_unit |
+|------------|---------------|---------------------------------------------------|-------------|---|------------|
+|Purchase    |Energy         |["2025-11-01 00:00:00+02","2025-11-01 01:00:00+02")| ...         |  1|kWh         |
+|Sale        |Energy         |["2025-11-01 00:00:00+02","2025-11-01 01:00:00+02")| ...         |  1|kWh         |
+|Purchase    |Energy         |["2025-11-01 00:01:00+02","2025-11-01 02:00:00+02")| ...         |  1|kWh         |
+|Sale        |Energy         |["2025-11-01 00:01:00+02","2025-11-01 02:00:00+02")| ...         |  1|kWh         |
+|Purchase    |Energy         |["2025-11-01 00:02:00+02","2025-11-01 03:00:00+02")| ...         |  1|kWh         |
+|Sale        |Energy         |["2025-11-01 00:02:00+02","2025-11-01 03:00:00+02")| ...         |  1|kWh         |
+| ...        | ...           | ...                                               | ...         |...|kWh         |
 
-This is for fees being a percentage of the net price (commonly used for taxes such as VAT). The basic formula is `energy * fee_value * price_value`, where `price_value` comes from the `electricity_prices` table. To make the relationship available, The`electricity_rates` table entries have to refer values from prices by a paid of `trade_type` and `price_name` columns. Notably, this relationship is not enforced by a foreign key constraint. It's intentional, to make possible maintaining prices and fees time periods in independent way.
-It makes possible to set like VAT for forever by using `(-infinity, infinity)` range. The drawback is, that a user has to take care about naming validity.
+This approach, though it creates redundant records, is more flexible and future-proof. It supports a wider range of trading scenarios, espaecially including changes in energy trading practices over time, while keeping the source code straightforward.
 
-The following example demonstrates a configuration of the VAT applicable for me:
+#### Rates table
 
+This table makes possible to deduct percentual fees from initial energy price. It might be taxes such as VAT). The formula for this calculation is `energy * fee_value * price_value`, where `price_value` comes from the `electricity_prices` table. To make the relationship available, the`electricity_rates` table entries refers pairs of `trade_type` and `price_name`. Notably, this relationship is not enforced by a foreign key constraint. It's intentional, to make the independent maintaince of prices and fees possible; Without need of making the data model overly complex and less intuitive.
+The ony drawback is, that a user has to take care about validity of names.
+
+As for example it's possible to use infinity values to setup VAT for forever using `(-infinity, infinity)` time range. 
+
+The following example demonstrates a configuration of the VAT applicable to price entries.
 
 |trade_type  |price_name     |fee_name|fee_period          |fee_value|dir|
 |------------|---------------|--------|--------------------|---------|---|
-|Purchase    |Ceps           |VAT     |(-infinity,infinity)|     0.21|  1|
+|Purchase    |CEPS           |VAT     |(-infinity,infinity)|     0.21|  1|
 |Purchase    |Dan Z Elektriny|VAT     |(-infinity,infinity)|     0.21|  1|
 |Purchase    |Distribution   |VAT     |(-infinity,infinity)|     0.21|  1|
 |Purchase    |Energy         |VAT     |(-infinity,infinity)|     0.21|  1|
-|Purchase    |Poze           |VAT     |(-infinity,infinity)|     0.21|  1|
+|Purchase    |POZE           |VAT     |(-infinity,infinity)|     0.21|  1|
 
-**ToDo - describe Dir**
-**ToDo - add example for both spot sale+purchase**
-
-Notice how both sale and purchase prices for energy are recorded separately. Although the spot price itself is singular, the system must distinguish between purchase and sale transactions. This approach keeps the logic straightforward and avoids unnecessary complexity.
-
-You can safely use `"infinity"` as a time boundary when the end date of a price period is not known. Open-ended periods can be defined with `-infinity` or `infinity`. When a price changes, update the entry to set the new time boundary. If you make this change before new data arrives, no further action is required. However, if you modify time boundaries for past periods, you must recalculate the cost CAGGs to update the data.
+It's possible to set many fees for single price item. These data are used to calculate final income or cost. For this purpose the order of operations does not matter. But it does when calculating an absolute value of single fee - it's something it has to be taken into account when extending this system.
 
 
+In both tables you can safely use `"infinity"` as a time boundary when the end date of a price period is not known. When a price changes, update the entry to set the new time boundary. If you make this change before new data arrives, no further action is required. However, if you modify time boundaries for past periods, you must recalculate the cost CAGGs to update the data.
 
 ### Feeding with data
 
@@ -223,11 +234,11 @@ You can safely use `"infinity"` as a time boundary when the end date of a price 
 
 When working with static energy prices, you typically update records only when contracts change. However, spot pricing requires frequent updates, as new price records must be entered continuously. The method you use to feed prices into your database depends on your data source and available tools. Options include custom Home Assistant (HA) integrations, Node-RED automations, external scripts, or even manual SQL queries for infrequently changing prices. The essential requirement is that prices are inserted into the `electricity_prices` table before energy data is aggregated into CAGGs.
 
-If HA is your data source, the simplest solution is to publish a sensor that provides the current price via LTSS to the database. However, this method has a significant drawback: any HA outage can result in missing price data, leading to zero calculated costs for those periods. This is generally unacceptable for accurate cost tracking.
+If HA is your data source, the simplest solution would be to publish a sensor that provides the current price via LTSS to the database. However, this method has a significant drawback: any HA outage can result in missing price data, leading to zero calculated costs for those periods. This is generally unacceptable for cost tracking.
 
-A more robust approach is to store prices in advance, especially since spot prices are often available ahead of time. The best solution will depend on your price provider’s API and your data processing workflow. While there is no universal method, the following example illustrates a practical approach.
+A more robust approach is to store prices in advance, especially since spot prices are often available ahead of time. The exact solution will depend on your price provider’s API and your data processing workflow. While there is no universal method, the following example illustrates a practical approach.
 
-Suppose you have a `sensor.tomorrow_spot_electricity_prices` entity in HA, which provides the next day's prices as a JSON array in its attributes:
+Suppose you have an entity in HA, which provides the next day's prices as a JSON array in its attributes:
 
 ```json
 "data": [
@@ -237,14 +248,25 @@ Suppose you have a `sensor.tomorrow_spot_electricity_prices` entity in HA, which
     ...
 ]
 ```
-To integrate such a sensor with TimescaleDB, you must publish it using the LTSS component. To automatically insert price data from the JSON structure, a database trigger is required. Below is an example trigger that processes the JSON data from the previous example.
 
-Note two key constraints in the code:
-- `ENTITYID` specifies the Home Assistant entity to process.
-- `TRADES` is an array containing `'Sale'`, `'Purchase'`, or both. This controls which trade types are handled for spot pricing. If you only sell energy at spot prices, remove `'Purchase'` from the array.
+To integrate such entity with TimescaleDB, you must publish it using the LTSS component. it will require adding this entity to ltss config and restarting the HA.
 
+To automatically insert price data from the JSON structure, a database trigger is required. Below is an example trigger that processes the JSON data from the example above. The name of entity is hardcoded in `ENTITYID` constant.
+
+Note the error handling: by default, any error causes the transaction to roll back. However, since it is critical not to lose any data from the `ltss` table, the trigger function suppresses errors. Instead, any error encountered is logged as a warning, ensuring that data ingestion continues uninterrupted.
 
 ```sql
+CREATE TABLE IF NOT EXISTS ltss_energy_ote.trades_import
+(
+    trade_type  TEXT NOT NULL,
+    trade_period TSTZRANGE NOT NULL,
+    CONSTRAINT pk_electricityprices PRIMARY KEY (trade_type, price_period),
+    CONSTRAINT xc_electricityprices_unique EXCLUDE USING gist (trade_type WITH =, price_period WITH &&),
+    CONSTRAINT ck_electricityprices_tradetype CHECK (trade_type IN ('Sale', 'Purchase'))
+);
+
+GRANT SELECT ON TABLE ltss_energy_ote.trades_import TO public;
+
 CREATE OR REPLACE FUNCTION ltss_energy_ote.tr_ltss_oteprices()
     RETURNS trigger
     LANGUAGE 'plpgsql'
@@ -255,7 +277,6 @@ DECLARE
     err_msg   TEXT;
     err_code  TEXT;
     ENTITYID CONSTANT TEXT = 'sensor.tomorrow_spot_electricity_prices';
-    TRADES   CONSTANT TEXT[] = Array['Sale','Purchase'];
 BEGIN
     -- THIS TRIGGER FUNCTION IS USED on public.ltss table
 
@@ -272,12 +293,14 @@ BEGIN
         volume_unit
     )
     SELECT 
-        unnest(TRADES),
+        t.trade_type,
         'Energy',
         tstzrange((j->>'time')::TIMESTAMPTZ, (j->>'time')::TIMESTAMPTZ + '1h'::INTERVAL, '[)'),
         (j->'price')::NUMERIC,
         'kWh'
-    FROM jsonb_array_elements(NEW.attributes->'data') AS j
+    FROM jsonb_array_elements(NEW.attributes->'data') AS j,
+         ltss_energy_ote.trade_import AS t
+    WHERE (j->>'time')::TIMESTAMPTZ <@ trade_period
     ON CONFLICT ON CONSTRAINT pk_electricityprices 
     DO UPDATE
     SET price_value = EXCLUDED.price_value
@@ -299,8 +322,29 @@ ON public.ltss
 FOR EACH ROW
 EXECUTE FUNCTION ltss_energy_ote.tr_ltss_oteprices();
 ```
+Depending on your requirements, you may need to store spot prices as sale, purchase, or both. While this could be hardcoded, a more flexible approach is to use data-driven configuration. This is especially useful if your business plan changes, allowing you to schedule adjustments in advance and avoid manual intervention when the change takes effect.
 
-Note the error handling: by default, any error causes the transaction to roll back. However, since it is critical not to lose any data from the `ltss` table, the trigger function suppresses errors. Instead, any error encountered is logged as a warning, ensuring that data ingestion continues uninterrupted.
+The code above creates a new table, `ltss_energy_ote.trades_import`, which defines valid trade types for specific time ranges. The trigger uses this table to determine which trade type should receive the spot price, based on the current settings.
+
+For example:
+
+| trade_type | trade_period                                 |
+|------------|----------------------------------------------|
+| Sale       | ["2025-11-01 00:00:00+01", infinity)         |
+| Purchase   | ["2026-06-01 00:00:00+02", infinity)         |
+
+This example above means that incoming spot prices will be stored in `electricity_prices` as Sale starting November 1st, and as Purchase beginning in June of the following year. Note that both Sale and Purchase records will continue to be stored from June onward, allowing you to track both trading directions simultaneously.
+
+If the table is empty, or if the price time does not match any entry, the price will not be added to the prices table. Be careful when entering timestamps, as time offsets can be error-prone - especially in regions with daylight saving time. It is recommended to use named time zones instead of fixed offsets.
+
+```sql
+INSERT INTO ltss_energy_ote.trades_import
+(trade_type, trade_period)
+VALUES
+('Sale',     tstzrange('2025-11-01 00:00 Europe/Prague', 'infinity', '[)')),
+('Purchase', tstzrange('2026-06-01 00:00 Europe/Prague', 'infinity', '[)'));
+```
+
 
 <details>
 <summary>For users of the Czech Energy Spot Prices custom integration</summary>
@@ -326,6 +370,7 @@ template:
             {% endfor %}
             {{ data.prices }}
 ```
+
 </details>
 
 ### Price Visualization
@@ -342,23 +387,23 @@ For improved performance, code clarity, and reusability, construct individual qu
 
 
 ```sql
-SELECT x.time, SUM(1000 * price_value * COALESCE(1+fee_value,1)) AS price, ec.trade_type AS type
+SELECT time as time, 1000 * price_value * COALESCE(1+fee_value,1) AS price, format('%s (%s)', ec.trade_type, ec.price_name) as type
 FROM ltss_energy_ote.electricity_prices AS ec
-JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1d'::INTERVAL) AS x(time) ON TRUE
+JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 d'::INTERVAL) AS x(time) ON TRUE
 LEFT JOIN ltss_energy_ote.electricity_fees AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE x.time <@ price_period
-AND NOT (ec.trade_type, ec.price_name) IN (('Sale', 'Energy'))
-GROUP BY 1, 3
+  AND NOT ((ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND LOWER(ec.price_period) >= '2025-11-01 0:0'::TIMESTAMPTZ)
 
-UNION ALL
+UNION
 
-SELECT LOWER(price_period) AS time, SUM(1000 * price_value * COALESCE(1+fee_value,1)) AS price, ec.trade_type AS type
+SELECT LOWER(price_period) AS time, SUM(1000 * price_value * COALESCE(1+fee_value,1)) AS price, format('%s (%s)', ec.trade_type, ec.price_name) AS type
 FROM ltss_energy_ote.electricity_prices AS ec
 LEFT JOIN ltss_energy_ote.electricity_fees AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE LOWER(price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
-AND (ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND 
+AND (ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND LOWER(ec.price_period) >= '2025-11-01 0:0'::TIMESTAMPTZ
 GROUP BY 1, 3
-ORDER BY type DESC
+
+ORDER BY type DESC, time
 ```
 The first query, with use of generate_series() function, generates a time points for given time period with values reflecting prices that change infrequently. It excludes energy sale prices since we expect them to be recorded hourly.
 
@@ -495,13 +540,13 @@ AS $f$
 $f$;
 ```
 
-The `calculate_cost()` function is straightforward: for a given trade type, it multiplies the specified energy value by all applicable prices and returns their sum. The optional `_exclude` parameter allows you to omit a specific price item by name, while `_include` restricts the calculation to a particular price entry.
+The `calculate_cost()` function is straightforward: for a given trade type, it multiplies the specified energy value by all applicable prices and returns their sum. The optional `_excl_pname` parameter allows you to omit a specific price item by name, while `_incl_pname` restricts the calculation to a particular price entry. Both accepts array of strings allowing to pass more values at once.
 
-The `calculate_fee()` function is slightly more complex, as it computes the total cost of both types of fees for the given energy value. Like `calculate_cost()`, it supports excluding certain fee entries from the result.
+The `calculate_fee()` function analogically calculates total percentual fee for trade type. Like previous function it allows to filter or exclude entries by price names(s) which might be combined with excluding or filtering by fee name(s) (`_incl_fname` and `_excl_fname`).
 
-By combining these functions, you can flexibly calculate a wide range of costs within CAGGs or use them directly for manual testing.
+By combining results of those these functions, you can flexibly calculate a wide range of costs within CAGGs or use them directly for manual testing.
 
-> If you change the function declaration from STABLE to IMMUTABLE, make sure to run `DISCARD PLANS` before each manual use (unless prices remain unchanged or you reconnect to the database).
+> Note these functions will not be accepted by TimescaleDB earlier than 2.20 because of their non-immutability. If you are on older version of TimescaleDB, change IMMUTABLE to STABLE. It will work as executed for CAGG refresh, but for manual use, make sure to run `DISCARD PLANS` before each execution.
 
 ## Aggregates for Energy
 The first-level CAGG aggregates hourly energy data from the `ltss` table. All subsequent CAGGs build on these precalculated energy aggregates.
