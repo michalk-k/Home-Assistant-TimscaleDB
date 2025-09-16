@@ -96,7 +96,7 @@ While both energy and costs could be materialized by the single CAGG, separating
 3. The energy CAGG can aggregate all energy sensors, while the cost CAGG can focus on a subset of sensors.
 4. The codebase remains cleaner and easier to maintain.
 
-**1. Net and fees (ie Taxes)**
+**1. Net values and fees (ie Taxes)**
 When trading on the spot market, prices are provided in net value. Depending on contract and other regulations some additional costs add added over the top of net price:
 * a fixed price per energy unit (e.g., 250 CZK per 1 MWh). It might be handling fee for a trading company, costs of distribution or other ones defined by goverment 
 * a percentage of the energy price (e.g., 15% of the sold energy price). It might be taxes or another way of calculating the handling fee for a trading copany
