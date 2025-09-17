@@ -220,9 +220,9 @@ When working with a mix of partial prices and spot prices, visualizing all price
 
 We are going to tacle with two categories of price records:
 * **Irregular, infrequently changing prices**: For visualization it's required to generate a continuous time series out of original price points
-* **Spot prices**: These are recorded as regular, ready to visualize, time series.
+* **Spot prices**: These are already recorded as regular, ready to visualize, time series.
 
-For improved performance, code clarity, and reusability, construct individual queries for each  category and combine their results using `UNION`. By grouping the data by trade type, you will generate distinct series for sales and purchases, resulting in a chart similar to the example above.
+For improved performance, code clarity, and reusability, construct individual queries for each category and combine their results using `UNION`. By grouping the data by trade type, you will generate distinct series for sales and purchases, resulting in a chart similar to the example above.
 
 
 ```sql
@@ -235,12 +235,11 @@ WHERE x.time <@ price_period
 
 UNION
 
-SELECT LOWER(price_period) AS time, SUM(1000 * price_value * COALESCE(1+fee_value,1)) AS price, format('%s (%s)', ec.trade_type, ec.price_name) AS type
+SELECT LOWER(price_period) AS time, 1000 * price_value * COALESCE(1+fee_value,1) AS price, format('%s (%s)', ec.trade_type, ec.price_name) AS type
 FROM ltss_energy_ote.electricity_prices AS ec
 LEFT JOIN ltss_energy_ote.electricity_rates AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE LOWER(price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
 AND (ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND LOWER(ec.price_period) >= '2025-11-01 0:0'::TIMESTAMPTZ
-GROUP BY 1, 3
 
 ORDER BY type DESC, time
 ```
@@ -273,16 +272,16 @@ In both examples, values are multiplied by 1000 to convert units to MWh. This sc
 <summary>SQL script creating pricing tables and functions</summary>
 
 ```sql
-DROP SCHEMA IF EXISTS ltss_energy_ote CASCADE;
-CREATE SCHEMA ltss_energy_ote;
+DROP SCHEMA IF EXISTS ltss_energy_ote2 CASCADE;
+CREATE SCHEMA ltss_energy_ote2;
 
-CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_prices
+CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_prices
 (
     trade_type  TEXT NOT NULL,
     price_name  TEXT NOT NULL,
     price_period TSTZRANGE NOT NULL,
     price_value NUMERIC NOT NULL,
-    dir INTEGER NOT NULL
+    dir INTEGER NOT NULL,
     volume_unit  TEXT NOT NULL,
     CONSTRAINT pk_electricityprices PRIMARY KEY (trade_type, price_name, price_period),
     CONSTRAINT xc_electricityprices_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, price_period WITH &&),
@@ -291,33 +290,33 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_prices
 );
 
 
-CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_rates
+CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_rates
 (
     trade_type  TEXT NOT NULL,
     price_name  TEXT NOT NULL,
     fee_name    TEXT NOT NULL,
     fee_period  TSTZRANGE NOT NULL,
     fee_value   NUMERIC NOT NULL,
-    dir         INTEGER NOT NULL
-    CONSTRAINT pk_electricityfeespricerel PRIMARY KEY (trade_type, price_name, fee_name, fee_period),
-    CONSTRAINT xc_electricityfeespricerel_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, fee_period WITH &&),
-    CONSTRAINT ck_electricityfeespricerel_tradetype CHECK (trade_type IN ('Sale', 'Purchase')),
-    CONSTRAINT ck_electricityfeespricerel_dir CHECK (dir IN (-1, 1))
+    dir         INTEGER NOT NULL,
+    CONSTRAINT pk_electricityrates PRIMARY KEY (trade_type, price_name, fee_name, fee_period),
+    CONSTRAINT xc_electricityrates_unique EXCLUDE USING gist (trade_type WITH =, price_name WITH =, fee_name WITH =, fee_period WITH &&),
+    CONSTRAINT ck_electricityrates_tradetype CHECK (trade_type IN ('Sale', 'Purchase')),
+    CONSTRAINT ck_electricityrates_dir CHECK (dir IN (-1, 1))
 );
 
-COMMENT ON TABLE ltss_energy_ote.electricity_prices IS 'Net prices for an energy volume';
+COMMENT ON TABLE ltss_energy_ote2.electricity_prices IS 'Net prices for an energy volume';
 
-COMMENT ON TABLE ltss_energy_ote.electricity_rates IS 'Fees to be calculated from the net value of energy volume';
+COMMENT ON TABLE ltss_energy_ote2.electricity_rates IS 'Fees to be calculated from the net value of energy volume';
 
-GRANT USAGE ON SCHEMA ltss_energy_ote TO public;
-GRANT SELECT ON TABLE ltss_energy_ote.electricity_rates, ltss_energy_ote.electricity_prices TO public;
+GRANT USAGE ON SCHEMA ltss_energy_ote2 TO public;
+GRANT SELECT ON TABLE ltss_energy_ote2.electricity_rates, ltss_energy_ote2.electricity_prices TO public;
 
 CREATE OR REPLACE AGGREGATE public.nmul(numeric) (
 	SFUNC = numeric_mul,
 	STYPE = numeric
 );
 
-CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_cost
+CREATE OR REPLACE FUNCTION ltss_energy_ote2.calculate_cost
 (
     _trade_type TEXT,
     _time       TIMESTAMPTZ,
@@ -332,7 +331,7 @@ AS $f$
 
     SELECT
         trim_scale(SUM(_value * price_value * dir)) AS val_total
-    FROM ltss_energy_ote.electricity_prices AS p
+    FROM ltss_energy_ote2.electricity_prices AS p
     WHERE _time <@ price_period
       AND trade_type       = _trade_type
       AND p.price_name     = ANY(COALESCE(_incl_pname, Array[price_name]))
@@ -341,7 +340,7 @@ AS $f$
 $f$;
 
 
-CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_fee
+CREATE OR REPLACE FUNCTION ltss_energy_ote2.calculate_fee
 (
 	_trade_type TEXT,
 	_time       TIMESTAMPTZ,
@@ -360,8 +359,8 @@ AS $f$
     FROM
     (
         SELECT p.price_value * COALESCE((1 - public.nmul(1 - f.fee_value)), 1) AS value
-        FROM ltss_Energy_ote.electricity_prices AS p
-        JOIN ltss_Energy_ote.electricity_fees   AS f ON (p.trade_type, p.price_name) = (f.trade_type, f.price_name)
+        FROM ltss_energy_ote2.electricity_prices AS p
+        JOIN ltss_energy_ote2.electricity_rates   AS f ON (p.trade_type, p.price_name) = (f.trade_type, f.price_name)
         WHERE _time <@ p.price_period
           AND _time <@ f.fee_period
           AND p.trade_type      = _trade_type
@@ -640,4 +639,89 @@ To generate costs of of this energy, call refresh method method.
 ```sql
 CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_costs_hourly', NULL, NULL, TRUE);
 CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_costs_daily', NULL, NULL, TRUE);
+```
+
+
+```sql
+WITH RECURSIVE fee_calculator AS (
+
+    -- ANCHOR MEMBER: This is the starting point (level 0).
+    -- It selects the base price for every item, initializing the calculation.
+    SELECT
+        p.trade_type,
+        p.price_name,
+        x.time,
+        p.price_value,
+        0 AS level,                                -- The starting level is 0.
+        p.price_value AS cumulative_base,          -- The base for calculating the next level's fees.
+        0::NUMERIC    AS total_fees_accumulated     -- The total fees calculated so far.
+
+    FROM ltss_energy_ote2.electricity_prices p
+	JOIN generate_series(NOW(), NOW(), '1 d'::INTERVAL) AS x(time) ON TRUE
+	WHERE x.time <@ price_period
+
+    UNION ALL
+
+    -- RECURSIVE MEMBER: This part iterates through the fee levels.
+    -- It takes the result from the previous step (pc) and calculates the fees for the next level.
+    SELECT
+        pc.trade_type,
+        pc.price_name,
+        pc.time,
+        pc.price_value,
+        pc.level + 1 AS level,                    -- Increment the level for the current calculation.
+
+        -- Calculate the new cumulative base by adding this level's fees.
+        pc.cumulative_base + (pc.cumulative_base * summed_rates.total_rate_for_level) AS cumulative_base,
+
+        -- Add the fees calculated for this level to the running total.
+        pc.total_fees_accumulated + (pc.cumulative_base * summed_rates.total_rate_for_level) AS total_fees_accumulated
+
+    FROM
+        fee_calculator pc
+		
+    /*
+     * This LATERAL join is crucial. For each row from the previous step (pc),
+     * it finds all relevant fees for the *next* level (pc.level + 1),
+     * ensures their time periods overlap, and sums their rates.
+     * The recursion for a price item stops when this join finds no rates for the next level.
+     */
+    CROSS JOIN LATERAL (
+        SELECT
+            SUM(r.fee_value) AS total_rate_for_level
+        FROM
+            ltss_energy_ote2.electricity_rates r
+        WHERE
+            r.trade_type = pc.trade_type
+        AND r.price_name = pc.price_name
+        AND r.level      = pc.level + 1           -- Match the next level.
+        AND pc.time  <@ r.fee_period       -- Ensure time periods overlap.
+    ) AS summed_rates
+    WHERE summed_rates.total_rate_for_level IS NOT NULL
+)
+
+-- FINAL SELECTION:
+-- The CTE generates all intermediate steps. We only want the final result for each price.
+-- We use a window function to find the row with the highest 'level' for each price item.
+SELECT
+    trade_type,
+    price_name,
+    time,
+    price_value,
+    total_fees_accumulated,
+    cumulative_base AS final_price_with_fees,
+	level,
+	rn
+FROM (
+    SELECT
+        *,
+        ROW_NUMBER() OVER(PARTITION BY trade_type, price_name, time ORDER BY level DESC) as rn
+    FROM
+        fee_calculator
+) AS final_results
+WHERE
+   true-- rn = 1 -- This filters for the very last calculation step (the highest level).
+	AND (trade_type,price_name) = ('Purchase','Distribution')
+ORDER BY
+    trade_type, price_name, time;
 ```
