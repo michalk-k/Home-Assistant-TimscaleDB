@@ -2,7 +2,7 @@
 
 The previous article was about collecting and presenting data stored cumulatively, such as energy consumption within a timespan. A different approach is needed when visualizing continuous data like temperature or CPU usage. While we still use TimescaleDB features to prepare data, the key difference lies in understanding the nature of the data and how to process it for visualization.
 
-During these exercises, we generally encounter two categories of data: rarely changing and frequently changing.
+During these exercises, we generally encounter two categories of data: rarely and frequently changing.
 
 The first category might include, for example, free disk space. Depending on the data collection method and storage utilization, there might be only a few samples per day. Although disk space can theoretically change every second, in the Home Assistant environment changes tend to be infrequent. Another example is temperature data from battery-powered sensors.
 
@@ -26,12 +26,10 @@ How do we achieve that?
 The configuration requirements were detailed in the previous article. Here's a summary:
 
 1. Home Assistant
-1. Glances - Home Assistant add-on providing system metrics
 1. TimescaleDB (e.g., as a Home Assistant add-on)
 1. LTSS - a custom Home Assistant component publishing data to TimescaleDB
+1. Glances - Home Assistant add-on providing system metrics
 1. Grafana (e.g., as a Home Assistant add-on)
-
-Ensure LTSS publishes the necessary sensor data to TimescaleDB. Example configuration:
 
 Since we commited to visualize HA hardware metrics, we need to ensure LTSS publishes required sensors to the TimescaleDB. My config looks like this:
 
@@ -60,7 +58,7 @@ ltss:
       - sensor.*cpu_percent
 ```
 
-Most sensors are provided by Glances. The glob patterns capture additional CPU and memory usage metrics for each Docker container.
+Most sensors are provided by Glances. The glob patterns capture CPU and memory sensors for each HA add-on. These sensors are often disabled by default, waiting for you to enable them.
 
 With this data in place, we can build dashboards like this:
 ![Dashbaord](./images/grafana_hw_dashboard.png)   
@@ -69,13 +67,31 @@ With this data in place, we can build dashboards like this:
 
 Collecting high-frequency data can consume significant disk space and system resources, especially on mini-computers like the Raspberry Pi.
 
-Generally, only recent data needs to be high resolution. Historical data is usually used for trend analysis.
-
+Generally, only recent data needs to be high resolution. Historical data is usually used for trend analysis. 
 To balance storage and performance, we downsample data over time using TimescaleDB's features. Before applying data retention, finalize a downsampling plan. 
 
 > :warning: Retention is only safe after confirming that your resolution plan works well.
 
 **Proposed Downsampling Plan**
+
+```
+      drop old data           compressed data     -30d
+ltss        ─ ─ ─ ─ ─ ┴◆◆◆◆◆◆◆◆◆◆◆◆◆◆┴────────────────────────────────────────┬───>
+                                                                                          -5min
+5min CAGG   ─ ─ ─ ─ ◆◆◆◆◆◆◆◆◆◆◆◆────────────────────────────────────────────────┴···>
+                                                                                     -15min
+15min CAGG  ◆◆◆◆◆◆◆◆◆◆◆◆────────────────────────────────────────────────────┴·······>
+                                                                                -1h
+1h CAGG     ◆◆◆◆─────────────────────────────────────────────────────────────┴-·············>
+                                                                  -1d        
+1day CAGG   ◆─────────────────────────────────────────────────────┴···························┼> time
+                                                                                              now
+Legend:
+─────── materialized data
+······· data accessible via real-time CAGG view
+◆◆◆◆compressed data
+─ ─ ─ ─ dropped data
+```
 
 **[ToDo: make an image]**
 1. Store original data for 1 month.
@@ -99,7 +115,9 @@ CREATE SCHEMA ltss_ha_metrics;
 GRANT USAGE ON SCHEMA ltss_ha_metrics TO public;
 ```
 
-Now, for flexibility of further changes, let's create a helper function, which provides list of sensors to be processed by the first level CAGG:
+CAGGs will process only selected number of sensors. Because CAGG code, once deployed, cannot be modified, it's good to have a list of sensors stored in a way which gives option for further changes. Because of that, let's create a helper function:
+
+**ToDo: propose better name**
 
 ```sql
 CREATE OR REPLACE FUNCTION ltss_ha_metrics.get_entities_for_cagg_hametrics(entityid text)
@@ -110,33 +128,31 @@ AS $function$
    SELECT ARRAY[entityid] && ARRAY
           [
             -- replace sensor names with your ones.
-          'sensor.glances_cpu_load',
-          'sensor.glances_cpu_used',
-          'sensor.glances_cpu_percent',
           'sensor.glances_cpu_thermal_0_temperature',
-          'sensor.glances_ram_free',
-          'sensor.glances_ram_used',
-          'sensor.glances_ram_used_percent',
-          'sensor.glances_swap_free',
-          'sensor.glances_swap_used',
-          'sensor.glances_data_free',
-          'sensor.glances_swap_used',
-          'sensor.glances_data_used_percent',
           'sensor.localhost_sda_disk_read',
           'sensor.localhost_sda_disk_write'
           ]
-          OR entityid ~ E'^sensor\..*(cpu|memory)_percent';
+          OR entityid ~ E'^sensor\.glances_[a-z]+_(load|free|used)$';
+          OR entityid ~ E'^sensor\..*(cpu|memory|ram_used|data_used)_percent$';
 $function$;
 ```
 
-It works a bit differently than similar one proposed in previous article. It's because the new one has to match variable number of sensors reflecting running HA add-ons. To save us from editing this function everytime we add new add-on, the function gets entity identifier, matching it against fixed array of predefined names and then regular expression.
+The function gets entity identifier, matching it against fixed array of predefined names and then regular expression. The function returns BOOLEAN (`TRUE` or `FALSE`) depending if requested `entity_id` has to be processed or not. This way once we will want to add or remove entity, it's enough to edit this function. Note this function is IMMUTABLE which allows Postgresql to execute it in more performant way.
 
-The function returns BOOLEAN (TRUE or FALSE).
+Now we are ready to create CAGGs, that will downsample data to 5 minute, 15 minute, hourly and daily slices. 
 
-Now we are ready to create the first level CAGG, downsampling data to 5 minute slices. The query bellow passes entity_id to the helper function which determines whether the row is taken or skipped.
+Notice what data the CAGGs provides. Besides obvious `bucket` (time) and `entity_id` it will store
+* minimum value found within 5 minute range
+* maximum value found within 5 minute range
+* perc_agg - meta data providing a way to chose percentile later on, ie at time of visualization
+
+Having this one, let's create hierarchy of CAGGs:
+
+<details>
+<summary>SQL script creating CAGGs</summary>
 
 ```sql
-CREATE MATERIALIZED VIEW ltss_ha_metrics.cagg_energy_5mins
+CREATE MATERIALIZED VIEW ltss_ha_metrics.cagg_hametrics_5mins
 WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('5min'::INTERVAL, "time", 'Europe/Prague') AS bucket,
@@ -144,22 +160,13 @@ SELECT
     MIN(state)::DOUBLE PRECISION AS min_value,
     MAX(state)::DOUBLE PRECISION AS max_value,
     percentile_agg(state::DOUBLE PRECISION) AS perc_agg
-FROM ltss
+FROM public.ltss
 WHERE ltss_ha_metrics.get_entities_for_cagg_hametrics(entity_id)
   AND state NOT IN ('unavailable', 'unknown')
 GROUP BY bucket, entity_id
 WITH NO DATA;
-```
 
-Notice what data the CAGG provides. Besides obvious "bucket" (time) and "entity_id" it will store
-* minimum value found within 5 minute range
-* maximum value found within 5 minute range
-* perc_agg - meta data providing option to chose percentile later on, ie at time of visualization
-
-Having this one, let's create hierarchy of CAGGs:
-
-```sql
-CREATE MATERIALIZED VIEW ltss_ha_metrics.cagg_energy_15mins
+CREATE MATERIALIZED VIEW ltss_ha_metrics.cagg_hametrics_15mins
 WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('15min'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
@@ -167,11 +174,11 @@ SELECT
     MIN(min_value) AS min_value,
     MAX(max_value) AS max_value,
     ROLLUP(perc_agg) AS perc_agg
-FROM ltss_ha_metrics.cagg_energy_5mins
+FROM ltss_ha_metrics.cagg_hametrics_5mins
 GROUP BY 1, 2
 WITH NO DATA;
 
-CREATE MATERIALIZED VIEW ltss_ha_metrics.cagg_energy_hourly
+CREATE MATERIALIZED VIEW ltss_ha_metrics.cagg_hametrics_1h
 WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1h'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
@@ -179,11 +186,11 @@ SELECT
     MIN(min_value) AS min_value,
     MAX(max_value) AS max_value,
     ROLLUP(perc_agg) AS perc_agg
-FROM ltss_ha_metrics.cagg_energy_15mins
+FROM ltss_ha_metrics.cagg_hametrics_15mins
 GROUP BY 1, 2
 WITH NO DATA;
 
-CREATE MATERIALIZED VIEW ltss_ha_metrics.cagg_energy_daily
+CREATE MATERIALIZED VIEW ltss_ha_metrics.cagg_hametrics_1d
 WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1d'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
@@ -191,78 +198,74 @@ SELECT
     MIN(min_value) AS min_value,
     MAX(max_value) AS max_value,
     ROLLUP(perc_agg) AS perc_agg
-FROM ltss_ha_metrics.cagg_energy_hourly
+FROM ltss_ha_metrics.cagg_hametrics_hourly
 GROUP BY 1, 2
 WITH NO DATA;
 
-```
 
-Next steps are just a formality. But our CAGGs are currently empty. Let's fill them with data:
-```sql
-CALL refresh_continuous_aggregate('ltss_energy.cagg_energy_5mins', NULL, NOW()-'10m'::INTERVAL);
-CALL refresh_continuous_aggregate('ltss_energy.cagg_energy_15mins', NULL, NOW()-'1h'::INTERVAL);
-CALL refresh_continuous_aggregate('ltss_energy.cagg_energy_hourly', NULL, NOW()-'2h'::INTERVAL);
-CALL refresh_continuous_aggregate('ltss_energy.cagg_energy_daily', NULL, NOW()-'2h'::INTERVAL);
-```
+-- Make accessible for read to any connected user
+GRANT SELECT ON TABLE ltss_ha_metrics.cagg_hametrics_5mins TO public;
+GRANT SELECT ON TABLE ltss_ha_metrics.cagg_hametrics_15mins TO public;
+GRANT SELECT ON TABLE ltss_ha_metrics.cagg_hametrics_1h TO public;
+GRANT SELECT ON TABLE ltss_ha_metrics.cagg_hametrics_1d TO public;
 
-Set up refresh policy, schedule rules how CAGGs are refreshed:
-
-```sql
+-- Setup aggregation refresh policy
 SELECT add_continuous_aggregate_policy(
-   continuous_aggregate => 'ltss_ha_metrics.cagg_energy_5mins',
+   continuous_aggregate => 'ltss_ha_metrics.cagg_hametrics_5mins',
    start_offset         => '15 mins'::INTERVAL,
    end_offset           => '5 minutes'::INTERVAL,
    schedule_interval    => '2.5 minutes'::INTERVAL
 );
 
 SELECT add_continuous_aggregate_policy(
-   continuous_aggregate => 'ltss_ha_metrics.cagg_energy_15mins',
+   continuous_aggregate => 'ltss_ha_metrics.cagg_hametrics_15mins',
    start_offset         => '45 minutes'::INTERVAL,
    end_offset           => '10 minutes'::INTERVAL,
    schedule_interval    => '15 minutes'::INTERVAL
 );
 
 SELECT add_continuous_aggregate_policy(
-   continuous_aggregate => 'ltss_ha_metrics.cagg_energy_hourly',
+   continuous_aggregate => 'ltss_ha_metrics.cagg_hametrics_1h',
    start_offset         => '3 hours'::INTERVAL,
    end_offset           => '30 minutes'::INTERVAL,
    schedule_interval    => '30 minutes'::INTERVAL
 );
 
 SELECT add_continuous_aggregate_policy(
-   continuous_aggregate => 'ltss_ha_metrics.cagg_energy_daily',
+   continuous_aggregate => 'ltss_ha_metrics.cagg_hametrics_1d',
    start_offset         => '72 hours'::INTERVAL,
    end_offset           => '11 hours'::INTERVAL,
    schedule_interval    => '8 hours'::INTERVAL
 );
+
+-- Make CAGG present data up to current moment, regardless the refresh policy
+ALTER MATERIALIZED VIEW ltss_ha_metrics.cagg_hametrics_5mins
+SET (timescaledb.materialized_only = false);
+
+ALTER MATERIALIZED VIEW ltss_ha_metrics.cagg_hametrics_15mins
+SET (timescaledb.materialized_only = false);
+
+ALTER MATERIALIZED VIEW ltss_ha_metrics.cagg_hametrics_hourly
+SET (timescaledb.materialized_only = false);
+
+ALTER MATERIALIZED VIEW ltss_ha_metrics.cagg_hametrics_daily
+SET (timescaledb.materialized_only = false);
+
 ```
 
+</details>
 
-Make CAGGs containing data up to now(), regardless refresh policy:
+
+_ToDo: Review time windows_
+
+Note that all CAGGs are have been created with NO DATA option. It creates them empty, while filled with new data thanks to added refresh policies. If you already have data in `ltss` table wanting them to be aggregated, then run commands below. The commands have to be run one by one, from more detailed up to less detailed, since latter are based on former ones. Depending on amount of data it might takes minutes.
 
 ```sql
-ALTER MATERIALIZED VIEW ltss_ha_metrics.cagg_energy_5mins
-SET (timescaledb.materialized_only = false);
-
-ALTER MATERIALIZED VIEW ltss_ha_metrics.cagg_energy_15mins
-SET (timescaledb.materialized_only = false);
-
-ALTER MATERIALIZED VIEW ltss_ha_metrics.cagg_energy_hourly
-SET (timescaledb.materialized_only = false);
-
-ALTER MATERIALIZED VIEW ltss_ha_metrics.cagg_energy_daily
-SET (timescaledb.materialized_only = false);
+CALL refresh_continuous_aggregate('ltss_energy.cagg_hametrics_5mins', NULL, NOW()-'10m'::INTERVAL);
+CALL refresh_continuous_aggregate('ltss_energy.cagg_hametrics_15mins', NULL, NOW()-'1h'::INTERVAL);
+CALL refresh_continuous_aggregate('ltss_energy.cagg_hametrics_1h', NULL, NOW()-'2h'::INTERVAL);
+CALL refresh_continuous_aggregate('ltss_energy.cagg_hametrics_1d', NULL, NOW()-'2h'::INTERVAL);
 ```
-
-
-Having ready-to-use CAGGs, let's set up privileges to allow other logged users (ie Grafana) read from them:
-```sql
-GRANT SELECT ON TABLE ltss_ha_metrics.cagg_energy_5mins TO public;
-GRANT SELECT ON TABLE ltss_ha_metrics.cagg_energy_15mins TO public;
-GRANT SELECT ON TABLE ltss_ha_metrics.cagg_energy_hourly TO public;
-GRANT SELECT ON TABLE ltss_ha_metrics.cagg_energy_daily TO public;
-```
-
 
 # Grafana visualizations
 
@@ -274,7 +277,7 @@ Let's start with visualization showing last know state of selected metrics, and 
 
 Let's create new panel, selecting `stat` as visualization type.
 Then put following query into:
-
+  
 ```sql
 SELECT 
     time,
@@ -337,11 +340,11 @@ data AS
         time_bucket_gapfill('5m', "time", NOW()-'1d'::INTERVAL, NOW()) as bucket, 
         CASE entity_id
           WHEN 'sensor.glances_cpu_thermal_0_temperature' THEN 'CPU temperature'
-          WHEN 'sensor.glances_ram_used_percent' THEN 'RAM usage'
-          WHEN 'sensor.glances_cpu_used' THEN 'CPU usage'
-          WHEN 'sensor.glances_data_used_percent' THEN 'SSD usage'
-          WHEN 'sensor.localhost_sda_disk_read' THEN 'SSD reads'
-          WHEN 'sensor.localhost_sda_disk_write' THEN 'SSD writes'
+          WHEN 'sensor.glances_ram_used_percent'          THEN 'RAM usage'
+          WHEN 'sensor.glances_cpu_used'                  THEN 'CPU usage'
+          WHEN 'sensor.glances_data_used_percent'         THEN 'SSD usage'
+          WHEN 'sensor.localhost_sda_disk_read'           THEN 'SSD reads'
+          WHEN 'sensor.localhost_sda_disk_write'          THEN 'SSD writes'
         END as entity_id,
         interpolate(max(state::DOUBLE PrECISION), 
           (
@@ -429,7 +432,7 @@ BEGIN
     entities AS
     (
       SELECT *, approx_percentile(0.5,perc_agg) AS median
-      FROM ltss_ha_metrics.cagg_energy_%3$s
+      FROM ltss_ha_metrics.cagg_hametrics_%3$s
       WHERE entity_id = ANY(%5$L)
         AND bucket BETWEEN %1$L AND %2$L
     )
@@ -493,7 +496,7 @@ $function$
 ;
 ```
 
-## median surrounded by Min-Max Graph
+## Median surrounded by Min-Max Graph
 
 With ready to use tools, let's create our first visuzalization.
 
