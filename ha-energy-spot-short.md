@@ -13,74 +13,50 @@ The diagram below illustrates involved components and objects to be created. Rel
 
 ```mermaid
 flowchart LR
-
     subgraph Postgresql
+
         style Postgresql fill:lightgray
         style HA fill:lightgray
 
-        t_prices@{ shape: bow-rect, label: "electricity_prices" }
-        t_feesp@{ shape: bow-rect, label: "electricity_rates" }
+        t_prices@{ label: "electricity_prices" }
+        t_feesp@{ label: "electricity_fees" }
 
-        f_costs@{ shape: rect, label: "calculate_cost()" }
-        f_fees@{ shape: rect, label: "calculate_fees()" }
+        t_ltss@{ shape: rect, label: "public.ltss" }
 
-        subgraph public.ltss
-            direction TB
-            t_ltss@{ shape: bow-rect, label: "Table" }
-            tr_ltss@{ shape: rect, label: "Trigger" }
-        end
+        subgraph En
+            v_energy_qh@{ label: "Energy Quarter-hourly" }
+            v_energy_h@{ label: "Energy Hourly" }
+            v_energy_d@{ label: "Energy Daily" }
 
-        subgraph cagg_energy_hourly
-            direction TB
-            v_energy_h@{ shape: bow-rect, label: "View" }
-            p_energy_h@{ shape: rect, label: "Scheduler" }
-        end
-
-        subgraph cagg_energy_daily
-            direction TB
-            v_energy_d@{ shape: bow-rect, label: "View" }
-            p_energy_d@{ shape: rect, label: "Scheduler" }
-        end
-
-        subgraph cagg_costs_hourly
-            direction TB
-            v_costs_h@{ shape: bow-rect, label: "View" }
-            p_costs_h@{ shape: rect, label: "Scheduler" }
-        end
-
-        subgraph cagg_costs_daily
-            direction TB
-            v_costs_d@{ shape: bow-rect, label: "View" }
-            p_costs_d@{ shape: rect, label: "Scheduler" }
+            v_costs_qh@{ label: "Costs Quarter-hourly" }
+            v_costs_h@{ label: "Costs Hourly" }
+            v_costs_d@{ label: "Costs Daily" }
         end
 
     end
 
     subgraph HA
-        
         p_ltss@{ shape: rect, label: "LTSS\nCustom Integration" }
     end
 
-    v_energy_h-->p_energy_d
-    t_ltss-->p_energy_h
-    tr_ltss-->t_prices
-    p_ltss-->t_ltss
-    p_energy_h-->v_energy_h
-    p_energy_d-->v_energy_d
-    v_energy_h-->p_costs_h
-    v_costs_h-->p_costs_d
-    p_costs_h-->v_costs_h
-    p_costs_d-->v_costs_d
-    t_ltss-->tr_ltss
+    p_ltss-->|insert|t_ltss
 
-    f_costs-->p_costs_h
-    f_fees-->p_costs_h
 
-    t_prices-->f_costs
-    t_prices-->f_fees
-    t_feesp-->f_fees
+    v_energy_qh-->|fetch|t_ltss
+    v_costs_qh-->|fetch|t_ltss
+
+    v_energy_h-->|fetch|v_energy_qh
+    v_energy_d-->|fetch|v_energy_h
+
+    v_energy_qh-->|fetch|v_costs_qh
+    v_costs_qh-->|"calculate_fees()"|t_feesp
+    v_costs_qh-->|"calculate_costs()"|t_prices
+    
+    v_costs_h-->|fetch|v_costs_qh
+    v_costs_d-->|fetch|v_costs_h
+
+    t_ltss-->|trigger|t_prices
 ```
-
 
 The overall approach remains similar to the previous article, rendering a few hierarchical CAGGs, based on provided prices. Despite of it, it introduces two important changes:
 
@@ -133,7 +109,7 @@ Here is an example of my price setting. It represents purchasing and saling for 
 |Sale        |Energy         |["2025-11-01 00:02:00+02","2025-11-01 03:00:00+02")| ...         |  1|kWh         |
 | ...        | ...           | ...                                               | ...         |...|kWh         |
 
-You might notice a record named EnerSpot. It correlates with a breaking point when I started to to sell for spot prices. For ths operation, the operator will charge me 250CZK / 1MWh. To be able to cover calculation of both: purchasing cost and income with use of a single formula, I estabilished the `dir` attribute. The math is as easy as it seems: `dir=1` adds value to, while `dir=-1` deducts values from the sum. The income is sold energy minus operator handling fee, this dir equal to -1. You get the point, right?
+You might notice a record named EnerSpot. It correlates with a breaking point when I started to to sell for spot prices. For this operation, the operator will charge me 250CZK / 1MWh. To be able to cover calculation of both: purchasing cost and income with use of a single formula, I estabilished the `dir` attribute. The math is as easy as it seems: `dir=1` adds value to, while `dir=-1` deducts values from the sum. The income is sold energy minus operator handling feel the `minus` in formula is secured by `dir=-1`. You get the point, right?
 
 If you surf on the Spot, meaning you are purchasing and saling with spot prices, the prices have to be recorded into the table for sale and purchase. Which could look like this:
 
@@ -161,11 +137,11 @@ For example:
 
 This example above means that incoming spot prices will be stored in `electricity_prices` as Sale starting November 1st, and as Purchase beginning in June of the following year. Note that both Sale and Purchase records will continue to be stored from June onward, allowing you to track both trading directions simultaneously.
 
-If the table is empty, or if the price time does not match any entry, the price will not be added to the prices table. Be careful when entering timestamps, as time offsets can be error-prone - especially in regions with daylight saving time. It is recommended to use named time zones instead of fixed offsets when entering data.
+If the table is empty, or if the price time does not match any entry, the price will not be added to the prices table. Be careful when entering timestamps, as time offsets can be error-prone - especially in regions with daylight saving time.
 
-#### Rates table
+#### Fees table
 
-This table makes possible to deduct percentual fees from initial energy price. It might be taxes such as VAT). Notably, there is relationship between (trade_type, price_name) pair to prices table. This relationship is not enforced by a foreign key constraint. It's intentional, to make the independent maintaince of prices and fees possible; Without need of making the data model overly complex and less intuitive.
+This table makes possible to deduct percentual fees from initial energy price calculated for a volume. It might be taxes such as VAT. Notably, there is relationship between (trade_type, price_name) pair to prices table. This relationship is not enforced by a foreign key constraint. It's intentional, to make the independent maintaince of prices and fees possible; Without need of making the data model overly complex and less intuitive.
 
 As for example it's possible to use infinity values to setup VAT for forever using `(-infinity, infinity)` time range. 
 
@@ -181,34 +157,36 @@ The following example demonstrates a configuration of the VAT applicable to pric
 |Purchase    |Energy         |VAT     |(-infinity,infinity)|     0.21|  1|
 |Purchase    |POZE           |VAT     |(-infinity,infinity)|     0.21|  1|
 
-It's possible to set many fees for single price item. These data are used to calculate final income or cost. For this purpose the order of operations does not matter. But it does when calculating an absolute value of single fee - it's something it has to be taken into account when extending this system.
+It's possible to set many fees for single price item. These data are used to calculate final income or cost. For this purpose the order of operations does not matter.
 
 ## Populating prices
 
-> This part is tricky because it strongly depends on how you collect spot prices. Use it as a source of inspiration and adapt the approach to match your data provider, integration method, and automation tools.
+> :bulb: This part is tricky because it strongly depends on how you collect spot prices. Use it as a source of inspiration and adapt the approach to match your data provider, integration method, and automation tools.
 
 When working with static energy prices, you typically update records only when contracts change. However, spot pricing requires frequent updates, as new price records must be entered continuously. The method you use to feed prices into your database depends on your data source and available tools. Options include custom Home Assistant (HA) integrations, Node-RED automations, external scripts, or even manual SQL queries for infrequently changing prices. The essential requirement is that prices are inserted into the `electricity_prices` table before energy data is aggregated into CAGGs.
 
-If HA is your data source, the simplest solution would be to publish a sensor that provides the current price via LTSS to the database. However, this method has a significant drawback: any HA outage can result in missing price data, leading to zero calculated costs for those periods. This is generally unacceptable for cost tracking.
+If HA is your data source, the simplest solution would be to publish a sensor that provides the current price via LTSS to the database. However, this method has a significant drawback: any delay in delivering price to the database leads to skewing costs for those periods. This is generally unacceptable for cost tracking.
 
-A more robust approach is to store prices in advance, especially since spot prices are often available ahead of time. The exact solution will depend on your price provider’s API and your data processing workflow. While there is no universal method, the following example illustrates a practical approach.
+A more robust approach is to store prices in advance, especially since spot prices are available ahead of time. The exact solution will depend on your price provider’s API and your data processing workflow. While there is no universal method, the following example illustrates a practical approach.
 
 Suppose you have an entity in HA, which provides the next day's prices as a JSON array in its attributes:
 
 ```json
-"data": [
-    {"time": "time1", "price": 1.0},
-    {"time": "time2", "price": 2.0},
-    {"time": "time3", "price": 3.0}
-    ...
-]
+{
+    "period": "00:15:00",
+    "data": [
+        {"time": "time1", "price": 1.0},
+        {"time": "time2", "price": 2.0},
+        {"time": "time3", "price": 3.0}
+        ...
+    ]
+}
 ```
 
 To integrate such entity with TimescaleDB, you must publish it using the LTSS component. It will require adding this entity to the `LTSS` config and restarting the HA.
 
-To automatically insert price data from the JSON structure, a database trigger is required. Below is an example trigger that processes the JSON data from the example above. The name of entity is hardcoded in `ENTITYID` constant.
-
-Note the error handling: by default, any error causes the transaction to roll back. However, since it is critical not to lose any data from the `ltss` table, the trigger function suppresses errors. Instead, any error encountered is logged as a warning, ensuring that data ingestion continues uninterrupted.
+To automatically insert price data from the JSON structure, a database trigger is required. 
+See _'Example of trigger processing SPOT prices'_ in [SQL Code](#sql-code) section bellow.
 
 ## Presentation in Grafana
 
@@ -216,33 +194,38 @@ Note the error handling: by default, any error causes the transaction to roll ba
 
 Once prices are in the table, you can visualize them.
 ![Grafana Year of Prices](images/grafana-year-of-prices-ote.png)
-When working with a mix of partial prices and spot prices, visualizing all price components in a single graph can quickly become cluttered and hard to interpret. For clearer insights, consider creating separate graphs for components and for final trade price.
 
-We are going to tacle with two categories of price records:
+The graph above shows evolution of all price items by a year. As you can see, since November, the sale energy price changed drastically. It's because I've changed a fixed tarrif in favor of spot prices.
+
+We need to provide the Grafana with data series. For this case We are going to tacle with two categories of price records:
 * **Irregular, infrequently changing prices**: For visualization it's required to generate a continuous time series out of original price points
 * **Spot prices**: These are already recorded as regular, ready to visualize, time series.
 
 For improved performance, code clarity, and reusability, construct individual queries for each category and combine their results using `UNION`. By grouping the data by trade type, you will generate distinct series for sales and purchases, resulting in a chart similar to the example above.
 
+<details>
+<summary>SQL query to fetch prices to Grafana</summary>
 
 ```sql
 SELECT time as time, 1000 * price_value * COALESCE(1+fee_value,1) AS price, format('%s (%s)', ec.trade_type, ec.price_name) as type
 FROM ltss_energy_ote.electricity_prices AS ec
-JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1 d'::INTERVAL) AS x(time) ON TRUE
-LEFT JOIN ltss_energy_ote.electricity_rates AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ + '1d'::INTERVAL, '1 d'::INTERVAL) AS x(time) ON TRUE
+LEFT JOIN ltss_energy_ote.electricity_fees AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE x.time <@ price_period
   AND NOT ((ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND LOWER(ec.price_period) >= '2025-11-01 0:0'::TIMESTAMPTZ)
 
 UNION
 
-SELECT LOWER(price_period) AS time, 1000 * price_value * COALESCE(1+fee_value,1) AS price, format('%s (%s)', ec.trade_type, ec.price_name) AS type
+SELECT LOWER(price_period) AS time, SUM(1000 * price_value * COALESCE(1+fee_value,1)) AS price, format('%s (%s)', ec.trade_type, ec.price_name) AS type
 FROM ltss_energy_ote.electricity_prices AS ec
-LEFT JOIN ltss_energy_ote.electricity_rates AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+LEFT JOIN ltss_energy_ote.electricity_fees AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
 WHERE LOWER(price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
 AND (ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND LOWER(ec.price_period) >= '2025-11-01 0:0'::TIMESTAMPTZ
+GROUP BY 1, 3
 
 ORDER BY type DESC, time
 ```
+
 The first query, with use of generate_series() function, generates a time points with daily frequency for given time period with values reflecting prices that change infrequently. It excludes energy sale prices since we expect them to be recorded hourly.
 
 The second subquery specifically returns sale energy prices since November, 1st. These data assumed to be periodic (hourly) records.
@@ -253,15 +236,40 @@ If you buy and sell energy on the spot market, you might consider including the 
 
 If you do not use periodically recorded prices, you can omit the second subquery and remove the related condition from the first one. In this scenario, it might be reasonable to display all prices - including their individual components - within a single graph.
 
-![alt text](images/grafana-year-of-prices.png)
+</details>
+<br>
+Having query showing all components, it's easy to achieve sale vs purchase prices trend. It can be done on Grafana side as well as by SQL query itself. SQL provide below provides data for the latter option.
+
+![Grafana year of prices ote compacted](images/grafana-year-of-prices-ote2.png)
+
+<details>
+<summary>SQL for data of pricing compacted to sale and purchase</summary>
+
+
 ```sql
-SELECT x.time, 1000 * price_value * COALESCE(1+fee_value,1) AS price, format('%s (%s)', ec.trade_type, ec.price_name) AS type
+  SELECT time as time, 1000 * SUM(price_value * COALESCE(1+efr.fee_value,1)) AS price, ec.trade_type  as type
+  FROM ltss_energy_ote.electricity_prices AS ec
+  JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ + '1d'::INTERVAL, '1 d'::INTERVAL) AS x(time) ON TRUE
+  LEFT JOIN ltss_energy_ote.electricity_fees AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+  WHERE x.time <@ price_period
+    AND NOT ((ec.trade_type, ec.price_name) IN (('Sale', 'Energy')) AND LOWER(ec.price_period) >= '2025-11-01 0:0'::TIMESTAMPTZ)
+  GROUP by 1, 3
+
+UNION
+
+SELECT LOWER(ec.price_period) AS time, SUM(1000 * (ec.price_value * ec.dir + ec2.price_value * ec2.dir) * COALESCE(1+fee_value,1)) AS price, ec.trade_type AS type
 FROM ltss_energy_ote.electricity_prices AS ec
-JOIN generate_series(to_timestamp($__from/1000)::DATE::TIMESTAMPTZ, to_timestamp($__to/1000)::TIMESTAMPTZ, '1d'::INTERVAL) AS x(time) ON TRUE
-LEFT JOIN ltss_energy_ote.electricity_rates AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
-WHERE x.time <@ price_period
-ORDER BY type DESC
+LEFT JOIN ltss_energy_ote.electricity_fees AS efr ON efr.trade_type = ec.trade_type AND efr.price_name = ec.price_name AND ec.price_period <@ efr.fee_period
+LEFT JOIN ltss_energy_ote.electricity_prices AS ec2 ON (ec.trade_type = ec2.trade_type) AND ec.price_name <> ec2.price_name AND ec.price_period <@ ec2.price_period
+WHERE LOWER(ec.price_period) BETWEEN to_timestamp($__from/1000)::DATE::TIMESTAMPTZ AND to_timestamp($__to/1000)::TIMESTAMPTZ
+AND (ec.trade_type, ec.price_name) = ('Sale', 'Energy') AND LOWER(ec.price_period) >= '2025-11-01 0:0'::TIMESTAMPTZ
+GROUP BY 1, 3
+
+ORDER BY 1, 3 DESC
 ```
+
+</details>
+
 In both examples, values are multiplied by 1000 to convert units to MWh. This scaling aligns the data with standard price sheets, making comparisons clearer and more intuitive.
 
 
@@ -272,10 +280,10 @@ In both examples, values are multiplied by 1000 to convert units to MWh. This sc
 <summary>SQL script creating pricing tables and functions</summary>
 
 ```sql
-DROP SCHEMA IF EXISTS ltss_energy_ote2 CASCADE;
-CREATE SCHEMA ltss_energy_ote2;
+CREATE SCHEMA ltss_energy_ote;
+GRANT USAGE ON SCHEMA ltss_energy_ote TO public;
 
-CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_prices
+CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_prices
 (
     trade_type  TEXT NOT NULL,
     price_name  TEXT NOT NULL,
@@ -289,8 +297,15 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_prices
     CONSTRAINT ck_electricityprices_dir CHECK (dir IN (-1, 1))
 );
 
+COMMENT ON TABLE ltss_energy_ote.electricity_prices IS 'Net prices for an energy volume';
+COMMENT ON COLUMN ltss_energy_ote.electricity_prices.trade_type IS $$Either 'Sale' or 'Purchase'$$;
+COMMENT ON COLUMN ltss_energy_ote.electricity_prices.price_name IS $$Name assigned to the operation. The 'Energy' is reserved for electric energy. Other might be anything like 'Distribution', 'Maintenance' etc.$$;
+COMMENT ON COLUMN ltss_energy_ote.electricity_prices.price_period IS 'Time period the price is valid for';
+COMMENT ON COLUMN ltss_energy_ote.electricity_prices.price_value IS 'The value of price for the volume';
+COMMENT ON COLUMN ltss_energy_ote.electricity_prices.dir IS 'Affects summing. 1 means the value adds to the total. -1 deducts from the total and might be used for handling fee for the operator';
+COMMENT ON COLUMN ltss_energy_ote.electricity_prices.volume_unit IS 'kWh. Informative value just to emphasize that all values are for the same unit';
 
-CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_rates
+CREATE TABLE IF NOT EXISTS ltss_energy_ote.electricity_fees
 (
     trade_type  TEXT NOT NULL,
     price_name  TEXT NOT NULL,
@@ -304,19 +319,23 @@ CREATE TABLE IF NOT EXISTS ltss_energy_ote2.electricity_rates
     CONSTRAINT ck_electricityrates_dir CHECK (dir IN (-1, 1))
 );
 
-COMMENT ON TABLE ltss_energy_ote2.electricity_prices IS 'Net prices for an energy volume';
+COMMENT ON TABLE ltss_energy_ote.electricity_fees IS 'Fees to be calculated from the net value of energy volume';
+COMMENT ON COLUMN ltss_energy_ote.electricity_fees.trade_type IS $$Either 'Sale' or 'Purchase'$$;
+COMMENT ON COLUMN ltss_energy_ote.electricity_fees.price_name IS 'Name assigned to the operation. Together with trade_type must match the pair from `electricity_prices` table.';
+COMMENT ON COLUMN ltss_energy_ote.electricity_fees.fee_period IS 'Time period the price is valid for';
+COMMENT ON COLUMN ltss_energy_ote.electricity_fees.fee_value IS 'The value of price for the volume';
+COMMENT ON COLUMN ltss_energy_ote.electricity_fees.dir IS 'wip';
 
-COMMENT ON TABLE ltss_energy_ote2.electricity_rates IS 'Fees to be calculated from the net value of energy volume';
+GRANT SELECT ON TABLE ltss_energy_ote.electricity_rates, ltss_energy_ote.electricity_prices TO public;
 
-GRANT USAGE ON SCHEMA ltss_energy_ote2 TO public;
-GRANT SELECT ON TABLE ltss_energy_ote2.electricity_rates, ltss_energy_ote2.electricity_prices TO public;
-
-CREATE OR REPLACE AGGREGATE public.nmul(numeric) (
+CREATE OR REPLACE AGGREGATE public.nmul(NUMERIC) (
 	SFUNC = numeric_mul,
 	STYPE = numeric
 );
 
-CREATE OR REPLACE FUNCTION ltss_energy_ote2.calculate_cost
+COMMENT ON FUNCTION public.nmul(NUMERIC) IS 'Implements product aggregation (multiplicative reduction).';
+
+CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_cost
 (
     _trade_type TEXT,
     _time       TIMESTAMPTZ,
@@ -331,7 +350,7 @@ AS $f$
 
     SELECT
         trim_scale(SUM(_value * price_value * dir)) AS val_total
-    FROM ltss_energy_ote2.electricity_prices AS p
+    FROM ltss_energy_ote.electricity_prices AS p
     WHERE _time <@ price_period
       AND trade_type       = _trade_type
       AND p.price_name     = ANY(COALESCE(_incl_pname, Array[price_name]))
@@ -339,8 +358,10 @@ AS $f$
 
 $f$;
 
+COMMENT ON FUNCTION ltss_energy_ote.calculate_cost(TEXT, TIMESTAMPTZ, NUMERIC, TEXT[], TEXT[]) IS 'Helper function for the first level costs CAGG. It calculates price of energy volume using prices valid at given time';
 
-CREATE OR REPLACE FUNCTION ltss_energy_ote2.calculate_fee
+
+CREATE OR REPLACE FUNCTION ltss_energy_ote.calculate_fee
 (
 	_trade_type TEXT,
 	_time       TIMESTAMPTZ,
@@ -359,8 +380,8 @@ AS $f$
     FROM
     (
         SELECT p.price_value * COALESCE((1 - public.nmul(1 - f.fee_value)), 1) AS value
-        FROM ltss_energy_ote2.electricity_prices AS p
-        JOIN ltss_energy_ote2.electricity_rates   AS f ON (p.trade_type, p.price_name) = (f.trade_type, f.price_name)
+        FROM ltss_energy_ote.electricity_prices AS p
+        JOIN ltss_energy_ote.electricity_fees   AS f ON (p.trade_type, p.price_name) = (f.trade_type, f.price_name)
         WHERE _time <@ p.price_period
           AND _time <@ f.fee_period
           AND p.trade_type      = _trade_type
@@ -372,6 +393,9 @@ AS $f$
     ) AS sub
 
 $f$;
+
+COMMENT ON FUNCTION ltss_energy_ote.calculate_fee(TEXT, TIMESTAMPTZ, NUMERIC, TEXT[], TEXT[], TEXT[], TEXT[]) IS 'Helper function for the first level costs CAGG. It calculates a fee deducted from energy volume price at given time';
+
 ```
 </details>
 
@@ -399,9 +423,12 @@ CREATE OR REPLACE FUNCTION ltss_energy_ote.tr_ltss_oteprices()
 AS $BODY$
 
 DECLARE
-    err_msg   TEXT;
-    err_code  TEXT;
-    ENTITYID CONSTANT TEXT = 'sensor.tomorrow_spot_electricity_prices';
+    err_msg    TEXT;
+    err_code   TEXT;
+	err_hint   TEXT;
+	err_detail TEXT;
+	err_ctx	   TEXT; 
+    ENTITYID CONSTANT TEXT = 'sensor.pv_ctrl_spot_electricity_prices';
 BEGIN
     -- THIS TRIGGER FUNCTION IS USED on public.ltss table
 
@@ -415,14 +442,16 @@ BEGIN
         price_name, 
         price_period,
         price_value,
-        volume_unit
+        volume_unit,
+		dir
     )
-    SELECT 
+    SELECT DISTINCT
         t.trade_type,
         'Energy',
-        tstzrange((j->>'time')::TIMESTAMPTZ, (j->>'time')::TIMESTAMPTZ + '1h'::INTERVAL, '[)'),
+        tstzrange((j->>'time')::TIMESTAMPTZ, (j->>'time')::TIMESTAMPTZ + (NEW.attributes->>'period')::INTERVAL, '[)'),
         (j->'price')::NUMERIC,
-        'kWh'
+        'kWh',
+		1
     FROM jsonb_array_elements(NEW.attributes->'data') AS j,
          ltss_energy_ote.trade_import AS t
     WHERE (j->>'time')::TIMESTAMPTZ <@ trade_period
@@ -434,9 +463,16 @@ BEGIN
     RETURN NULL;
 
 EXCEPTION WHEN others THEN
-    GET STACKED DIAGNOSTICS err_msg  = MESSAGE_TEXT,
-                            err_code = RETURNED_SQLSTATE;
-    RAISE WARNING 'ERROR: [%], %', err_code, err_msg;
+    GET STACKED DIAGNOSTICS err_msg    = MESSAGE_TEXT,
+                            err_code   = RETURNED_SQLSTATE,
+							err_hint   = PG_EXCEPTION_HINT,
+							err_detail = PG_EXCEPTION_DETAIL,
+							err_ctx    = PG_EXCEPTION_CONTEXT;
+
+    RAISE WARNING USING
+		MESSAGE = format('[%s], %s\nCONTEXT:\n%s', err_code, err_msg, err_ctx),
+		DETAIL = err_detail,
+		HINT = err_hint;
     RETURN NULL;
 END;
 $BODY$;
@@ -453,55 +489,85 @@ EXECUTE FUNCTION ltss_energy_ote.tr_ltss_oteprices();
 
 
 <details>
-<summary>CAGGS code</summary>
+<summary>CAGGs code</summary>
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_energy_ote.get_entities_for_cagg_energy()
+CREATE OR REPLACE FUNCTION ltss_energy_ote.get_entities_for_cagg_energy_qhourly()
 RETURNS TEXT[]
-LANGUAGE 'sql'
+LANGUAGE sql
 IMMUTABLE
 AS $f$
+
 
    SELECT ARRAY
        [
             -- replace sensor names with your own.
-           'sensor.pg_mainhouse_total_energy_energy_hourly', -- consumption
-           'sensor.pg_cube_total_energy_energy_hourly',      -- consumption
-           'sensor.energy_injected_hourly',                  -- injected to grid
-           'sensor.energy_purchased_hourly',                 -- purchased from grid
-           'sensor.wattsonic_pv1_input_energy_2_hourly',     -- PV string 1 production
-           'sensor.wattsonic_pv2_input_energy_2_hourly',     -- PV string 2 production
-           'sensor.energy_discharged_from_battery_hourly',   -- Discharged from battery
-           'sensor.energy_charged_to_battery_hourly'         -- Charged to battery
+           'sensor.pg_mainhouse_total_energy_energy_quarter_hourly', -- consumption
+           'sensor.pg_cube_total_energy_energy_quarter_hourly',      -- consumption
+           'sensor.energy_injected_quarter_hourly',                  -- injected to grid
+           'sensor.energy_purchased_quarter_hourly',                 -- purchased from grid
+           'sensor.wattsonic_pv1_input_energy_2_quarter_hourly',     -- PV string 1 production
+           'sensor.wattsonic_pv2_input_energy_2_quarter_hourly',     -- PV string 2 production
+           'sensor.energy_discharged_from_battery_quarter_hourly',   -- Discharged from battery
+           'sensor.energy_charged_to_battery_quarter_hourly'         -- Charged to battery
            -- Other energy sensors you want to aggregate
        ];
 $f$;
 
-CREATE OR REPLACE FUNCTION ltss_energy_ote.get_entities_for_cagg_costs()
+CREATE OR REPLACE FUNCTION ltss_energy_ote.get_entities_for_cagg_costs_qhourly()
 RETURNS TEXT[]
-LANGUAGE 'sql'
+LANGUAGE sql
 IMMUTABLE
 AS $f$
+
 
    SELECT ARRAY
        [
             -- replace sensor names with your own.
-           'sensor.pg_mainhouse_total_energy_energy_hourly', -- consumption
-           'sensor.pg_cube_total_energy_energy_hourly',      -- consumption
-           'sensor.energy_injected_hourly',                  -- injected to grid
-           'sensor.energy_purchased_hourly'                  -- purchased from grid
+           'sensor.pg_mainhouse_total_energy', -- consumption
+           'sensor.pg_cube_total_energy',      -- consumption
+           'sensor.energy_injected',           -- injected to grid
+           'sensor.energy_purchased'           -- purchased from grid
        ];
 $f$;
 
+
+CREATE OR REPLACE FUNCTION ltss_energy_ote.normalize_energy_entity_name(entity_id TEXT)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+AS $BODY$
+
+   SELECT replace(
+            regexp_replace(entity_id, '(_(quarter_)?hourly)$', ''),
+            '_energy_energy',
+            '_energy'
+           );
+$BODY$;
+
+COMMENT ON FUNCTION ltss_energy_ote.normalize_energy_entity_name(TEXT) IS 'Removes suffixes like `quarter_hourly` from entity name. These suffixes are no more relevant, since the names land in all level CAGGs (ie daily). Also it makes Grafana views nicer';
+
+
+CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_qhourly
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('15m'::INTERVAL, "time", 'Europe/Prague') AS bucket,
+    ltss_energy_ote.normalize_energy_entity_name(entity_id),
+    delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS energy   
+FROM ltss
+WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy_qhourly())
+  AND state NOT IN ('unavailable', 'unknown')
+GROUP BY 1, 2
+WITH NO DATA;
+
+-- create hourly CAGG based on quarter hourly one
 CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
 WITH (timescaledb.continuous) AS
 SELECT
-    time_bucket('1h'::INTERVAL, "time", 'Europe/Prague') AS bucket,
-    entity_id,
-    delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS energy   
-FROM ltss
-WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy())
-  AND state NOT IN ('unavailable', 'unknown')
+   time_bucket('1h'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
+   entity_id,
+   SUM(energy) AS energy
+FROM ltss_energy_ote.cagg_energy_qhourly
 GROUP BY 1, 2
 WITH NO DATA;
 
@@ -516,10 +582,10 @@ FROM ltss_energy_ote.cagg_energy_hourly
 GROUP BY 1, 2
 WITH NO DATA;
 
-CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_costs_hourly
+CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_costs_qhourly
 WITH (timescaledb.continuous) AS
 SELECT
-    time_bucket('1h'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
+    time_bucket('15m'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
     entity_id,
     ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy)) + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(energy))
     AS purchase_cost,
@@ -540,7 +606,23 @@ SELECT
     AS sale_energy_cost -- net cost of sold energy
     
 FROM ltss_energy_ote.cagg_energy_hourly
-WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_costs())
+WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_costs_qhourly())
+GROUP BY 1, 2
+WITH NO DATA;
+
+
+CREATE MATERIALIZED VIEW ltss_energy_ote.cagg_costs_hourly
+WITH (timescaledb.continuous) AS
+SELECT
+   time_bucket('1h'::INTERVAL, bucket, 'Europe/Prague') AS bucket,
+   entity_id,
+   SUM(purchase_cost)           AS purchase_cost,          -- total cost = spot+fee+tax
+   SUM(purchase_trading_cost)   AS purchase_trading_cost,  -- totalcost-(energy*tax)
+   SUM(purchase_energy_cost)    AS purchase_energy_cost,   -- net cost (ie spot)
+   SUM(sale_income)             AS sale_income,            -- total cost = spot-fee (- potential taxes)
+   SUM(sale_trading_cost)       AS sale_trading_cost,      -- totalcost-(energy*tax)
+   SUM(sale_energy_cost)        AS sale_energy_cost        -- net cost (ie spot)
+FROM ltss_energy_ote.cagg_energy_qhourly
 GROUP BY 1, 2
 WITH NO DATA;
 
@@ -561,17 +643,25 @@ WITH NO DATA;
 
 -- Grant read access to everyone connected
 GRANT SELECT ON TABLE
+    ltss_energy_ote.cagg_energy_qhourly,
     ltss_energy_ote.cagg_energy_hourly,
     ltss_energy_ote.cagg_energy_daily,
+    ltss_energy_ote.cagg_costs_qhourly,
     ltss_energy_ote.cagg_costs_hourly,
     ltss_energy_ote.cagg_costs_daily
     TO public;
 
--- make both CAGGs real-time
+-- make CAGGs real-time
+ALTER MATERIALIZED VIEW ltss_energy_ote.cagg_energy_qhourly
+SET (timescaledb.materialized_only = FALSE);
+
 ALTER MATERIALIZED VIEW ltss_energy_ote.cagg_energy_hourly
 SET (timescaledb.materialized_only = FALSE);
 
 ALTER MATERIALIZED VIEW ltss_energy_ote.cagg_energy_daily
+SET (timescaledb.materialized_only = FALSE);
+
+ALTER MATERIALIZED VIEW ltss_energy_ote.cagg_costs_qhourly
 SET (timescaledb.materialized_only = FALSE);
 
 ALTER MATERIALIZED VIEW ltss_energy_ote.cagg_costs_hourly
@@ -583,145 +673,28 @@ SET (timescaledb.materialized_only = FALSE);
 -- start CAGGs refreshing automatically
 SELECT add_continuous_aggregate_policy
 (
-   'ltss_energy_ote.cagg_energy_hourly', '4h'::INTERVAL, '5m'::INTERVAL, '15m'::INTERVAL
+   'ltss_energy_ote.cagg_energy_qhourly', '1h'::INTERVAL, '15m'::INTERVAL, '5m'::INTERVAL
 );
 SELECT add_continuous_aggregate_policy
 (
-   'ltss_energy_ote.cagg_energy_daily', '3d'::INTERVAL, '4h'::INTERVAL, '12h'::INTERVAL
+   'ltss_energy_ote.cagg_energy_hourly', '3h'::INTERVAL, '1h'::INTERVAL, '30m'::INTERVAL
+);
+SELECT add_continuous_aggregate_policy
+(
+   'ltss_energy_ote.cagg_energy_daily', '3d'::INTERVAL, '1d'::INTERVAL, '12h'::INTERVAL
 );
 
--- start CAGGs refreshing automatically
 SELECT add_continuous_aggregate_policy
 (
-   'ltss_energy_ote.cagg_costs_hourly', '4h'::INTERVAL, '5m'::INTERVAL, '15m'::INTERVAL
+   'ltss_energy_ote.cagg_costs_qhourly', '1h'::INTERVAL, '15m'::INTERVAL, '5m'::INTERVAL
 );
 SELECT add_continuous_aggregate_policy
 (
-   'ltss_energy_ote.cagg_costs_daily', '3d'::INTERVAL, '4h'::INTERVAL, '12h'::INTERVAL
+   'ltss_energy_ote.cagg_costs_hourly', '3h'::INTERVAL, '1h'::INTERVAL, '30m'::INTERVAL
+)
+SELECT add_continuous_aggregate_policy
+(
+   'ltss_energy_ote.cagg_costs_daily', '3d'::INTERVAL, '1d'::INTERVAL, '12h'::INTERVAL
 );
 ```
 </details>
-
-# Migration Path
-
-1. Copy prices
-
-Keep in mind, that newly prices has to be stored as net value. If previously they were gross ones, values have to be reduced and possibly rates have to be reflected in rates table.
-
-```sql
-SELECT
-	initcap(cost_type) AS trade_type,
-	initcap(cost_kind) AS price_name,
-	tstzrange(lower(cost_range), upper(cost_range), (CASE WHEN lower_inc(cost_range) THEN '[' ELSE '(' END) || (CASE WHEN upper_inc(cost_range) THEN ']' ELSE ')' END)) AS price_period
-FROM ltss_energy.electricity_cost
-```
-
-2. Create price fees entries
-
-If applicable, fill `electricity_rates` with data reflectin taxes and handling fees based on percent of the cost
-
-3. Copy aggegared energy to new CAGG
-
-If ltss table doesn't contain source energy data (because of active retention policy), you can use already precalculated hourly and daily values, copying them into new CAGGs directly.
-
-```sql
-INSERT INTO ltss_energy_ote.cagg_energy_hourly (bucket, entity_id, energy)
-SELECT bucket, entity_id, value FROM ltss_energy.cagg_energy_hourly;
-
-INSERT INTO ltss_energy_ote.cagg_energy_daily (bucket, entity_id, energy)
-SELECT bucket, entity_id, value FROM ltss_energy.cagg_energy_daily;
-```
-
-4. Generate costs data
-
-To generate costs of of this energy, call refresh method method.
-
-```sql
-CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_costs_hourly', NULL, NULL, TRUE);
-CALL refresh_continuous_aggregate('ltss_energy_ote.cagg_costs_daily', NULL, NULL, TRUE);
-```
-
-
-```sql
-WITH RECURSIVE fee_calculator AS (
-
-    -- ANCHOR MEMBER: This is the starting point (level 0).
-    -- It selects the base price for every item, initializing the calculation.
-    SELECT
-        p.trade_type,
-        p.price_name,
-        x.time,
-        p.price_value,
-        0 AS level,                                -- The starting level is 0.
-        p.price_value AS cumulative_base,          -- The base for calculating the next level's fees.
-        0::NUMERIC    AS total_fees_accumulated     -- The total fees calculated so far.
-
-    FROM ltss_energy_ote2.electricity_prices p
-	JOIN generate_series(NOW(), NOW(), '1 d'::INTERVAL) AS x(time) ON TRUE
-	WHERE x.time <@ price_period
-
-    UNION ALL
-
-    -- RECURSIVE MEMBER: This part iterates through the fee levels.
-    -- It takes the result from the previous step (pc) and calculates the fees for the next level.
-    SELECT
-        pc.trade_type,
-        pc.price_name,
-        pc.time,
-        pc.price_value,
-        pc.level + 1 AS level,                    -- Increment the level for the current calculation.
-
-        -- Calculate the new cumulative base by adding this level's fees.
-        pc.cumulative_base + (pc.cumulative_base * summed_rates.total_rate_for_level) AS cumulative_base,
-
-        -- Add the fees calculated for this level to the running total.
-        pc.total_fees_accumulated + (pc.cumulative_base * summed_rates.total_rate_for_level) AS total_fees_accumulated
-
-    FROM
-        fee_calculator pc
-		
-    /*
-     * This LATERAL join is crucial. For each row from the previous step (pc),
-     * it finds all relevant fees for the *next* level (pc.level + 1),
-     * ensures their time periods overlap, and sums their rates.
-     * The recursion for a price item stops when this join finds no rates for the next level.
-     */
-    CROSS JOIN LATERAL (
-        SELECT
-            SUM(r.fee_value) AS total_rate_for_level
-        FROM
-            ltss_energy_ote2.electricity_rates r
-        WHERE
-            r.trade_type = pc.trade_type
-        AND r.price_name = pc.price_name
-        AND r.level      = pc.level + 1           -- Match the next level.
-        AND pc.time  <@ r.fee_period       -- Ensure time periods overlap.
-    ) AS summed_rates
-    WHERE summed_rates.total_rate_for_level IS NOT NULL
-)
-
--- FINAL SELECTION:
--- The CTE generates all intermediate steps. We only want the final result for each price.
--- We use a window function to find the row with the highest 'level' for each price item.
-SELECT
-    trade_type,
-    price_name,
-    time,
-    price_value,
-    total_fees_accumulated,
-    cumulative_base AS final_price_with_fees,
-	level,
-	rn
-FROM (
-    SELECT
-        *,
-        ROW_NUMBER() OVER(PARTITION BY trade_type, price_name, time ORDER BY level DESC) as rn
-    FROM
-        fee_calculator
-) AS final_results
-WHERE
-   true-- rn = 1 -- This filters for the very last calculation step (the highest level).
-	AND (trade_type,price_name) = ('Purchase','Distribution')
-ORDER BY
-    trade_type, price_name, time;
-```
