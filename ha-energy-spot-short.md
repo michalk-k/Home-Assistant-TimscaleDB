@@ -23,7 +23,7 @@ flowchart LR
 
         t_ltss@{ shape: rect, label: "public.ltss" }
 
-        subgraph En
+        subgraph CAGGs
             v_energy_qh@{ label: "Energy Quarter-hourly" }
             v_energy_h@{ label: "Energy Hourly" }
             v_energy_d@{ label: "Energy Daily" }
@@ -35,7 +35,7 @@ flowchart LR
 
     end
 
-    subgraph HA
+    subgraph HA [Home Assistant]
         p_ltss@{ shape: rect, label: "LTSS\nCustom Integration" }
     end
 
@@ -49,18 +49,18 @@ flowchart LR
     v_energy_d-->|fetch|v_energy_h
 
     v_energy_qh-->|fetch|v_costs_qh
-    v_costs_qh-->|"calculate_fees()"|t_feesp
-    v_costs_qh-->|"calculate_costs()"|t_prices
-    
+    v_costs_qh-->|"call calculate_fees()"|t_feesp
+    v_costs_qh-->|"call calculate_costs()"|t_prices
+
     v_costs_h-->|fetch|v_costs_qh
     v_costs_d-->|fetch|v_costs_h
 
-    t_ltss-->|trigger|t_prices
+    t_ltss-->|"trigger(insert)"|t_prices
 ```
 
 The overall approach remains similar to the previous article, rendering a few hierarchical CAGGs, based on provided prices. Despite of it, it introduces two important changes:
 
-**1. Separate CAGGs for Energy and Costs**  
+**1. Separate CAGGs for Energy and Costs**
 While both energy and costs can be materialized by the single CAGG, separating them offers several advantages:
 
 1. You can adjust prices retroactively and regenerate cost CAGGs, even if the original data is no longer present in the `ltss` table.
@@ -71,7 +71,7 @@ While both energy and costs can be materialized by the single CAGG, separating t
 **2. Net values and fees (ie Taxes)**
 
 When trading on the spot market, prices are provided in net value. Depending on contract and other regulations some additional costs add added over the top of net price:
-* a fixed price per energy unit (e.g., 250 CZK per 1 MWh). It might be handling fee for a trading company, costs of distribution or other ones defined by goverment 
+* a fixed price per energy unit (e.g., 250 CZK per 1 MWh). It might be handling fee for a trading company, costs of distribution or other ones defined by goverment
 * a percentage of the energy price (e.g., 15% of the sold energy price). It might be taxes or another way of calculating the handling fee for a trading copany
 
 To achieve that we will store all volume-based prices (ie 250CZK/MWh) in prices table, while percentage-based prices (ie 21% VAT) into rate table.
@@ -125,7 +125,7 @@ If you surf on the Spot, meaning you are purchasing and saling with spot prices,
 
 Despite it creates redundant records, is more flexible and future-proof. It supports a wider range of trading scenarios, including changes in energy trading practices over time, while keeping the source code straightforward.
 
-Which operations spot prices are recorded for is determined by content of `trades_import`. 
+Which operations spot prices are recorded for is determined by content of `trades_import`.
 The trigger uses this table to determine which trade type should receive the spot price, based on the current settings.
 
 For example:
@@ -137,13 +137,13 @@ For example:
 
 This example above means that incoming spot prices will be stored in `electricity_prices` as Sale starting November 1st, and as Purchase beginning in June of the following year. Note that both Sale and Purchase records will continue to be stored from June onward, allowing you to track both trading directions simultaneously.
 
-If the table is empty, or if the price time does not match any entry, the price will not be added to the prices table. Be careful when entering timestamps, as time offsets can be error-prone - especially in regions with daylight saving time.
+If the table is empty, or if the price time does not match any entry, the price will not be added to the prices table. Be careful when entering timestamps, as time offsets can be error-prone - especially in regions with daylight saving time. I advice to use named time zones like Europe/Prague, that makes database calculate proper time offset for the user.
 
 #### Fees table
 
 This table makes possible to deduct percentual fees from initial energy price calculated for a volume. It might be taxes such as VAT. Notably, there is relationship between (trade_type, price_name) pair to prices table. This relationship is not enforced by a foreign key constraint. It's intentional, to make the independent maintaince of prices and fees possible; Without need of making the data model overly complex and less intuitive.
 
-As for example it's possible to use infinity values to setup VAT for forever using `(-infinity, infinity)` time range. 
+As for example it's possible to use infinity values to setup VAT for forever using `(-infinity, infinity)` time range.
 
 The ony drawback is, that a user has to take care about validity of names.
 
@@ -183,10 +183,38 @@ Suppose you have an entity in HA, which provides the next day's prices as a JSON
 }
 ```
 
-To integrate such entity with TimescaleDB, you must publish it using the LTSS component. It will require adding this entity to the `LTSS` config and restarting the HA.
+To achieve this format, you will likely need to convert original data from your provided. Here is an example of Home Assistant template sensor, that converts data provided by Czech Spot Prices integration:
 
-To automatically insert price data from the JSON structure, a database trigger is required. 
+<details>
+<summary>Click for the code</summary>
+
+```yaml
+template:
+  - name: "Spot Electricity Prices"
+    unique_id: "pv_ctrl_spot_electricity_prices"
+    default_entity_id: sensor.pv_ctrl_spot_electricity_prices
+    state: "{{ states('sensor.current_spot_electricity_price_15min') }}"
+    unit_of_measurement: CZK/kWh
+    attributes:
+      interval: "00:15:00"
+      data: >
+          {% set data = namespace(prices=[]) %}
+          {% for key, val in states.sensor.current_spot_electricity_price_15min.attributes.items() %}
+          {% if key | as_datetime(0) != 0 %}
+              {% set obj  = { "time" : key, "price" : val | round(7) } %}
+              {% set data.prices = data.prices + [obj] %}
+          {% endif %}
+          {% endfor %}
+          {{ data.prices }}
+```
+
+</details>
+
+<br>Such sensor has to be published to our postgresql database using LTSS component. It will require adding it to the `LTSS` config and restarting the HA.
+
+The last step is to offload price data from the `ltss` table inserting them to pricing dedicated table. This task is executed by the trigger that picks data from the JSON structure, nd puts it to the destination table.
 See _'Example of trigger processing SPOT prices'_ in [SQL Code](#sql-code) section bellow.
+
 
 ## Presentation in Grafana
 
@@ -427,7 +455,7 @@ DECLARE
     err_code   TEXT;
 	err_hint   TEXT;
 	err_detail TEXT;
-	err_ctx	   TEXT; 
+	err_ctx	   TEXT;
     ENTITYID CONSTANT TEXT = 'sensor.pv_ctrl_spot_electricity_prices';
 BEGIN
     -- THIS TRIGGER FUNCTION IS USED on public.ltss table
@@ -439,7 +467,7 @@ BEGIN
     INSERT INTO ltss_energy_ote.electricity_prices AS ep
     (
         trade_type,
-        price_name, 
+        price_name,
         price_period,
         price_value,
         volume_unit,
@@ -455,7 +483,7 @@ BEGIN
     FROM jsonb_array_elements(NEW.attributes->'data') AS j,
          ltss_energy_ote.trade_import AS t
     WHERE (j->>'time')::TIMESTAMPTZ <@ trade_period
-    ON CONFLICT ON CONSTRAINT pk_electricityprices 
+    ON CONFLICT ON CONSTRAINT pk_electricityprices
     DO UPDATE
     SET price_value = EXCLUDED.price_value
     WHERE ep.price_value <> EXCLUDED.price_value;
@@ -553,7 +581,7 @@ WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('15m'::INTERVAL, "time", 'Europe/Prague') AS bucket,
     ltss_energy_ote.normalize_energy_entity_name(entity_id),
-    delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS energy   
+    delta(counter_agg("time", state::DOUBLE PRECISION))::NUMERIC AS energy
 FROM ltss
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_energy_qhourly())
   AND state NOT IN ('unavailable', 'unknown')
@@ -589,22 +617,22 @@ SELECT
     entity_id,
     ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy)) + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(energy))
     AS purchase_cost,
-    
+
     ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy), _excl_pname => Array['Energy']) + ltss_energy_ote.calculate_fee('Purchase', MAX(bucket), SUM(energy), _excl_pname => Array['Energy'])
     AS purchase_trading_cost,
-    
+
     ltss_energy_ote.calculate_cost('Purchase', MAX(bucket), SUM(energy), _incl_pname => Array['Energy'])
     AS purchase_energy_cost,
-    
+
     ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy)) - ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(energy))
     AS sale_income, -- net income
-    
+
     ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy), _excl_pname => Array['Energy']) + ltss_energy_ote.calculate_fee('Sale', MAX(bucket), SUM(energy), _excl_pname => Array['Energy'])
     AS sale_trading_cost, -- trading costs
-    
-    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy), _incl_pname => Array['Energy']) 
+
+    ltss_energy_ote.calculate_cost('Sale', MAX(bucket), SUM(energy), _incl_pname => Array['Energy'])
     AS sale_energy_cost -- net cost of sold energy
-    
+
 FROM ltss_energy_ote.cagg_energy_hourly
 WHERE entity_id = ANY (ltss_energy_ote.get_entities_for_cagg_costs_qhourly())
 GROUP BY 1, 2
