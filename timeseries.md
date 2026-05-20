@@ -61,48 +61,46 @@ ltss:
 Most sensors are provided by Glances. The glob patterns capture CPU and memory sensors for each HA add-on. These sensors are often disabled by default, waiting for you to enable them.
 
 With this data in place, we can build dashboards like this:
-![Dashbaord](./images/grafana_hw_dashboard.png)   
+![Dashbaord](./images/hw/grafana_hw_dashboard.png)   
 
 # Plan data resolution
 
-Collecting high-frequency data can consume significant disk space and system resources, especially on mini-computers like the Raspberry Pi.
+Collecting high-frequency data not only consume significant disk space but also other resources requested for fetching these data for visualization or analitics purposes. It's especially important on mini-computers like the Raspberry Pi. To balance storage and performance, we downsample data over time using TimescaleDB's features. 
 
-Generally, only recent data needs to be high resolution. Historical data is usually used for trend analysis. 
-To balance storage and performance, we downsample data over time using TimescaleDB's features. Before applying data retention, finalize a downsampling plan. 
+Generally, only recent days data are being analized with high resolution. Historical data is usually used for trend analysis. For this purpose we can opt for data retention, commanding the TimescaleDB to make it happen for us.
+
+Before applying data retention, finalize a downsampling plan. 
 
 > :warning: Retention is only safe after confirming that your resolution plan works well.
 
 **Proposed Downsampling Plan**
+The image below depicts proposal of downsampling plan including compression of cold data and then removal of even colder one. 
 
 ```
-      drop old data           compressed data     -30d
-ltss        ─ ─ ─ ─ ─ ┴◆◆◆◆◆◆◆◆◆◆◆◆◆◆┴────────────────────────────────────────┬───>
-                                                                                          -5min
-5min CAGG   ─ ─ ─ ─ ◆◆◆◆◆◆◆◆◆◆◆◆────────────────────────────────────────────────┴···>
-                                                                                     -15min
-15min CAGG  ◆◆◆◆◆◆◆◆◆◆◆◆────────────────────────────────────────────────────┴·······>
-                                                                                -1h
-1h CAGG     ◆◆◆◆─────────────────────────────────────────────────────────────┴-·············>
-                                                                  -1d        
-1day CAGG   ◆─────────────────────────────────────────────────────┴···························┼> time
-                                                                                              now
+                               -1y                                   -30d
+ltss        ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┴◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆┴────────────────────────────────────────────────────>
+                   -2y                                -90d                                                           -5min
+5min CAGG   ─ ─ ─ ─ ┴◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆┼───────────────────────────────────────────────────────────────┴···>
+                   -2y                                                                                         -15min
+15min CAGG  ─ ─ ─ ─ ┴◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆┼─────────────────────────────────────────────────────────┴·········>
+                                                                                                        -1h
+1h CAGG     ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆┼────────────────────────────────────────────────────────────────────────┴-·················>
+                              -1y                                                          -1d        
+1day CAGG   ◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆◆┼────────────────────────────────────────────────────────────┴·····························┼> time
+                                                                                                                          now
 Legend:
 ─────── materialized data
 ······· data accessible via real-time CAGG view
-◆◆◆◆compressed data
+◆◆◆◆◆◆◆ compressed data
 ─ ─ ─ ─ dropped data
 ```
 
-**[ToDo: make an image]**
-1. Store original data for 1 month.
-1. Downsample by 5 minutes — keep for 1 month.
-1. Downsample by 15 minutes — keep for 2 months.
-1. Downsample by 1 hour — keep for 1 year.
-1. Downsample by 1 day — keep for 3 years.
+The time periods shown above are not written in stone. Just random proposal to give you and idea.
+The point is to provide high-resolution recent data while reducing resource usage for older data, still keeping the general trends.
 
-This plan provides high-resolution recent data while reducing resource usage for older data.
+Note, that thanks to TimescaleDB features, downsampling does mean not only "dumb" avaraging of values. It still can provide information about maximas, minumas, percentiles etc. We will use this data further to draw interesting graphs in Grafana.
 
-> :bulb: The one-month original data retention is determined by the chunk size, which LTSS sets during table creation. You can change this (e.g., to 2 weeks), but only new partitions will be affected.
+> :bulb: The one-month original data retention is determined by the chunk size. You cannot drop or compress ie 2 weeks old data if partition is 1 month. You can change this (e.g., to 2 weeks), but only new partitions will be affected. Previously created partition will be processed once all data will be older than policy settings.
 
 # Prepare Database Objects
 
@@ -115,12 +113,10 @@ CREATE SCHEMA ltss_ha_metrics;
 GRANT USAGE ON SCHEMA ltss_ha_metrics TO public;
 ```
 
-CAGGs will process only selected number of sensors. Because CAGG code, once deployed, cannot be modified, it's good to have a list of sensors stored in a way which gives option for further changes. Because of that, let's create a helper function:
-
-**ToDo: propose better name**
+The downsampling will be achieved thanks to TimescaleDB feature called Continuous Aggregate. These will process only selected number of sensors. Because CAGG code, once deployed, cannot be modified, it's good to have a list of sensors stored in a way which gives option for further changes. Because of that, let's create a helper function:
 
 ```sql
-CREATE OR REPLACE FUNCTION ltss_ha_metrics.get_entities_for_cagg_hametrics(entityid text)
+CREATE OR REPLACE FUNCTION ltss_ha_metrics.confirm_entity_for_caggs(entityid text)
  RETURNS BOOLEAN
  LANGUAGE SQL
  IMMUTABLE
@@ -137,11 +133,11 @@ AS $function$
 $function$;
 ```
 
-The function gets entity identifier, matching it against fixed array of predefined names and then regular expression. The function returns BOOLEAN (`TRUE` or `FALSE`) depending if requested `entity_id` has to be processed or not. This way once we will want to add or remove entity, it's enough to edit this function. Note this function is IMMUTABLE which allows Postgresql to execute it in more performant way.
+The function will be called by the first level CAGG, returning TRUE for entity that has to be processed or FALSE otherwise.
 
-Now we are ready to create CAGGs, that will downsample data to 5 minute, 15 minute, hourly and daily slices. 
+> :bulb: The function is marked as IMMUTABLE improving its performance
 
-Notice what data the CAGGs provides. Besides obvious `bucket` (time) and `entity_id` it will store
+Now we are ready to create CAGGs. Notice what data the CAGGs provides. Besides obvious `bucket` (time) and `entity_id` it will store:
 * minimum value found within 5 minute range
 * maximum value found within 5 minute range
 * perc_agg - meta data providing a way to chose percentile later on, ie at time of visualization
@@ -161,7 +157,7 @@ SELECT
     MAX(state)::DOUBLE PRECISION AS max_value,
     percentile_agg(state::DOUBLE PRECISION) AS perc_agg
 FROM public.ltss
-WHERE ltss_ha_metrics.get_entities_for_cagg_hametrics(entity_id)
+WHERE ltss_ha_metrics.confirm_entity_for_caggs(entity_id)
   AND state NOT IN ('unavailable', 'unknown')
 GROUP BY bucket, entity_id
 WITH NO DATA;
@@ -220,8 +216,8 @@ SELECT add_continuous_aggregate_policy(
 SELECT add_continuous_aggregate_policy(
    continuous_aggregate => 'ltss_ha_metrics.cagg_hametrics_15mins',
    start_offset         => '45 minutes'::INTERVAL,
-   end_offset           => '10 minutes'::INTERVAL,
-   schedule_interval    => '15 minutes'::INTERVAL
+   end_offset           => '15 minutes'::INTERVAL,
+   schedule_interval    => '7.5 minutes'::INTERVAL
 );
 
 SELECT add_continuous_aggregate_policy(
@@ -233,9 +229,9 @@ SELECT add_continuous_aggregate_policy(
 
 SELECT add_continuous_aggregate_policy(
    continuous_aggregate => 'ltss_ha_metrics.cagg_hametrics_1d',
-   start_offset         => '72 hours'::INTERVAL,
-   end_offset           => '11 hours'::INTERVAL,
-   schedule_interval    => '8 hours'::INTERVAL
+   start_offset         => '3 days'::INTERVAL,
+   end_offset           => '8 hours'::INTERVAL,
+   schedule_interval    => '4 hours'::INTERVAL
 );
 
 -- Make CAGG present data up to current moment, regardless the refresh policy
@@ -255,16 +251,13 @@ SET (timescaledb.materialized_only = false);
 
 </details>
 
-
-_ToDo: Review time windows_
-
-Note that all CAGGs are have been created with NO DATA option. It creates them empty, while filled with new data thanks to added refresh policies. If you already have data in `ltss` table wanting them to be aggregated, then run commands below. The commands have to be run one by one, from more detailed up to less detailed, since latter are based on former ones. Depending on amount of data it might takes minutes.
+Note that all CAGGs have been created with `NO DATA` option. It creates them empty, while filled with new data thanks to added refresh policies. If you already have data in `ltss` table wanting them to be aggregated, then run commands below. The commands have to be run one by one, from more detailed up to less detailed, since latter are based on former ones. Depending on amount of data it might takes minutes.
 
 ```sql
 CALL refresh_continuous_aggregate('ltss_energy.cagg_hametrics_5mins', NULL, NOW()-'10m'::INTERVAL);
 CALL refresh_continuous_aggregate('ltss_energy.cagg_hametrics_15mins', NULL, NOW()-'1h'::INTERVAL);
 CALL refresh_continuous_aggregate('ltss_energy.cagg_hametrics_1h', NULL, NOW()-'2h'::INTERVAL);
-CALL refresh_continuous_aggregate('ltss_energy.cagg_hametrics_1d', NULL, NOW()-'2h'::INTERVAL);
+CALL refresh_continuous_aggregate('ltss_energy.cagg_hametrics_1d', NULL, NOW()-'8h'::INTERVAL);
 ```
 
 # Grafana visualizations
